@@ -176,11 +176,26 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
-# 获取 VPS IP
-VPS_IP=$(hostname -I | awk '{print $1}')
-if [ -z "$VPS_IP" ]; then
-    VPS_IP=$(curl -s -m 5 ifconfig.me 2>/dev/null || echo "127.0.0.1")
-fi
+# 获取真实 IP（优先 IPv6，避免内网地址）
+get_realip() {
+    ip=$(curl -4 -sm 2 ip.sb)
+    ipv6() { curl -6 -sm 2 ip.sb; }
+    if [ -z "$ip" ]; then
+        echo "[$(ipv6)]"
+    else
+        if curl -4 -sm 2 http://ipinfo.io/org | grep -qE 'Cloudflare|UnReal|AEZA|Andrei'; then
+            echo "[$(ipv6)]"
+        else
+            if grep -qE '^\s*precedence\s+::ffff:0:0/96\s+100' "/etc/gai.conf" 2>/dev/null; then
+                echo "$ip"
+            else
+                v6=$(ipv6)
+                [ -n "$v6" ] && echo "[$v6]" || echo "$ip"
+            fi
+        fi
+    fi
+}
+VPS_IP=$(get_realip)
 
 # 输出信息
 echo ""
