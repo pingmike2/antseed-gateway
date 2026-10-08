@@ -1,0 +1,159 @@
+# Antseed Gateway
+
+一键部署 Antseed P2P 推理市场 buyer proxy，暴露 OpenAI 兼容 API。
+
+## 特性
+
+- 一键安装：`apikey=your_key bash install.sh`
+- 自动安装 Node 24 + Antseed CLI
+- 免费模型优先路由（`preferFreePeers: true`）
+- systemd 服务管理
+- OpenAI 兼容 API（`/v1/chat/completions`、`/v1/models`）
+
+## 快速开始
+
+```bash
+# 下载并运行
+curl -fsSL https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh -o install.sh
+apikey=your_api_key bash install.sh
+```
+
+或：
+
+```bash
+git clone https://github.com/pingmike2/antseed-gateway.git
+cd antseed-gateway
+apikey=your_api_key bash install.sh
+```
+
+## 配置
+
+安装完成后，编辑 `/root/.antseed/config.json`：
+
+```json
+{
+  "buyer": {
+    "routingPreferences": {
+      "preferFreePeers": true,
+      "maxInputUsdPerMillion": 25,
+      "minTrustScore": 0
+    }
+  }
+}
+```
+
+修改后重启服务：
+
+```bash
+systemctl restart antseed-gateway
+```
+
+## 使用
+
+### 查看模型列表
+
+```bash
+curl http://127.0.0.1:8377/v1/models
+```
+
+### 调用模型
+
+```bash
+curl http://127.0.0.1:8377/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v4-flash",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+### Hermes 配置
+
+在 `~/.hermes/config.yaml` 添加：
+
+```yaml
+model:
+  provider: antseed
+  default: antseed
+  base_url: "http://127.0.0.1:8377/v1"
+  api_mode: chat_completions
+
+providers:
+  antseed:
+    name: Antseed
+    api: http://127.0.0.1:8377/v1
+    api_key: your_api_key
+    transport: chat_completions
+    default_model: antseed
+    models:
+      antseed:
+        context_length: 200000
+```
+
+## 管理命令
+
+```bash
+# 查看状态
+systemctl status antseed-gateway
+
+# 查看日志
+journalctl -u antseed-gateway -f
+
+# 重启
+systemctl restart antseed-gateway
+
+# 停止
+systemctl stop antseed-gateway
+```
+
+## 免费模型
+
+当前可用的 $0 模型（需网络连通）：
+
+- `deepseek-v4-flash`
+- `glm-4.7-flash`
+- `glm-5.3-flash`
+- `MiniMax-M3`
+- `openai-gpt-oss-120b`
+- `qwen3-235b-instruct`
+- `nemotron-3-ultra-free`
+
+查看实时报价：
+
+```bash
+curl -s https://network.antseed.com/stats | jq '.peers[].providers[].services'
+```
+
+## 故障排查
+
+### 服务启动失败
+
+```bash
+journalctl -u antseed-gateway -n 100
+```
+
+### 模型调用 502
+
+```bash
+# 检查网络连通性
+curl -s http://127.0.0.1:8377/v1/models | jq '.data[].id' | head
+
+# 检查日志
+journalctl -u antseed-gateway -n 50 | grep -i error
+```
+
+### Node 版本问题
+
+```bash
+node -v  # 应该是 v24.x
+```
+
+## 系统要求
+
+- Linux x64/arm64
+- root 权限
+- 网络可访问 `network.antseed.com`
+
+## License
+
+MIT
