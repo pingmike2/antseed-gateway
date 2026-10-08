@@ -10,9 +10,9 @@ set -euo pipefail
 # 卸载模式
 if [ "${1:-}" = "uninstall" ]; then
     echo "[antseed-gateway] 卸载 Antseed Gateway..."
-    systemctl stop antseed-gateway.service 2>/dev/null || true
-    systemctl disable antseed-gateway.service 2>/dev/null || true
-    rm -f /etc/systemd/system/antseed-gateway.service
+    systemctl stop antseed-gateway.service antseed-buyer.service 2>/dev/null || true
+    systemctl disable antseed-gateway.service antseed-buyer.service 2>/dev/null || true
+    rm -f /etc/systemd/system/antseed-gateway.service /etc/systemd/system/antseed-buyer.service
     systemctl daemon-reload
     rm -rf /root/.antseed
     rm -f /etc/profile.d/antseed.sh
@@ -31,8 +31,8 @@ log()  { echo -e "${GREEN}[antseed-gateway]${NC} $*"; }
 warn() { echo -e "${YELLOW}[antseed-gateway]${NC} $*"; }
 err()  { echo -e "${RED}[antseed-gateway]${NC} $*" >&2; exit 1; }
 
-# 获取 API key
-API_KEY="${apikey:-}"
+# 获取 API key（可选，不传则自动生成）
+API_KEY="${apikey}"
 if [ -z "$API_KEY" ]; then
     # 尝试从 stdin 读取
     if [ ! -t 0 ]; then
@@ -40,7 +40,8 @@ if [ -z "$API_KEY" ]; then
     fi
 fi
 if [ -z "$API_KEY" ]; then
-    err "请设置 apikey: apikey=your_key bash install.sh"
+    API_KEY="sk-antseed-$(openssl rand -hex 16)"
+    log "已自动生成 API key"
 fi
 
 # 检查 root
@@ -130,18 +131,17 @@ if [ -z "$ANTSEED_BIN" ] || [ ! -f "$ANTSEED_BIN" ]; then
 fi
 ln -sf "$ANTSEED_BIN" /usr/local/bin/antseed 2>/dev/null || true
 
-# 创建 systemd service
-cat > /etc/systemd/system/antseed-gateway.service <<EOF
+# 创建 buyer service（监听 127.0.0.1:8378）
+cat > /etc/systemd/system/antseed-buyer.service <<EOF
 [Unit]
-Description=Antseed Gateway Buyer Proxy
+Description=Antseed Buyer Proxy (internal)
 After=network.target
 
 [Service]
 Type=simple
 User=root
 Environment="ANTSEED_IDENTITY_HEX=${IDENTITY_HEX}"
-Environment="ANTSEED_API_KEY=${API_KEY}"
-ExecStart=/usr/local/bin/antseed buyer start
+ExecStart=/usr/local/bin/antseed buyer start --port 8378
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -152,15 +152,68 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable antseed-gateway.service >/dev/null 2>&1
+systemctl enable antseed-buyer.service >/dev/null 2>&1
 
-# 启动
+# 启动 buyer
+log "启动 Antseed Buyer..."
+systemctl start antseed-buyer.service
+sleep 5
+
+# 等待 buyer 就绪
+log "等待 buyer 就绪..."
+for i in $(seq 1 30); do
+    if curl -s -m 2 http://127.0.0.1:8378/v1/models >/dev/null 2>&1; then
+        break
+    fi
+    sleep 2
+done
+
+# 创建 gateway API key
+log "创建 API key..."
+export ANTSEED_IDENTITY_HEX=${IDENTITY_HEX}
+GATEWAY_KEY=$(/usr/local/bin/antseed gateway key create --label hermes --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',''))" 2>/dev/null || echo "")
+if [ -z "$GATEWAY_KEY" ]; then
+    # 尝试非 JSON 格式
+    GATEWAY_KEY=$(/usr/local/bin/antseed gateway key create --label hermes 2>&1 | grep -oP 'antseed_[A-Za-z0-9]+' | head -1 || echo "")
+fi
+if [ -z "$GATEWAY_KEY" ]; then
+    warn "无法创建 API key，使用用户提供的 key"
+    GATEWAY_KEY="${API_KEY}"
+fi
+log "API key: ${GATEWAY_KEY:0:12}..."
+
+# 创建 gateway service（监听 0.0.0.0:8377，转发到 buyer 8378）
+cat > /etc/systemd/system/antseed-gateway.service <<EOF
+[Unit]
+Description=Antseed Gateway (public API)
+After=network.target antseed-buyer.service
+Requires=antseed-buyer.service
+
+[Service]
+Type=simple
+User=root
+Environment="ANTSEED_IDENTITY_HEX=${IDENTITY_HEX}"
+Environment="ANTSEED_API_KEY=${GATEWAY_KEY}"
+ExecStart=/usr/local/bin/antseed gateway start --host 0.0.0.0 --port 8377 --buyer-port 8378
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl reenable antseed-gateway.service >/dev/null 2>&1
+
+# 启动 gateway
 log "启动 Antseed Gateway..."
-systemctl start antseed-gateway.service
+systemctl restart antseed-gateway.service
 sleep 5
 
 # 检查状态
-if systemctl is-active --quiet antseed-gateway.service; then
+if systemctl is-active --quiet antseed-gateway.service && systemctl is-active --quiet antseed-buyer.service; then
     log "Antseed Gateway 运行中"
 else
     warn "服务启动失败，查看日志: journalctl -u antseed-gateway -n 50"
@@ -204,11 +257,11 @@ echo "  Antseed Gateway 安装完成"
 echo "========================================"
 echo ""
 echo "  Proxy:  http://${VPS_IP}:8377/v1"
-echo "  API Key: ${API_KEY}"
+echo "  API Key: ${GATEWAY_KEY}"
 echo ""
 echo "  Hermes 配置:"
 echo "    base_url: http://${VPS_IP}:8377/v1"
-echo "    api_key:  ${API_KEY}"
+echo "    api_key:  ${GATEWAY_KEY}"
 echo ""
 echo "  常用命令:"
 echo "    systemctl status antseed-gateway"

@@ -30,6 +30,10 @@
 ## 快速开始
 
 ```bash
+# 不传 apikey 则自动生成
+bash <(wget -qO- https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
+
+# 或自定义 apikey
 apikey=your_key bash <(wget -qO- https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
 ```
 
