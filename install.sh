@@ -197,7 +197,7 @@ log "写入对外网关 (filter)..."
 cat > /usr/local/bin/antseed-free-filter.py <<'PYEOF'
 #!/usr/bin/env python3
 """对外 OpenAI 兼容网关:Bearer 鉴权 + 转发到内部 buyer(127.0.0.1:8378)。
-FREE_ONLY=1 时 /v1/models 只返回存在 $0 报价 peer 的模型。"""
+FREE_ONLY=1 时 /v1/models 只返回 type=text 且存在 $0 报价 peer 的模型。"""
 import http.server, json, os, socketserver, urllib.request, urllib.error
 
 UPSTREAM = "http://127.0.0.1:8378"
@@ -266,6 +266,9 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._err(502, f"upstream error: {e}")
         out = []
         for m in data.get("data", []):
+            # 只保留文本模型:图片等非 chat 模型走 chat/completions 会被上游 400
+            if m.get("type") != "text":
+                continue
             peers = [p for p in m.get("peers", []) if is_free(p)]
             if peers:
                 m["peers"] = peers
