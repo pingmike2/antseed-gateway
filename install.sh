@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Antseed Gateway 一键安装脚本
-# 用法: apikey=your_key bash install.sh
+# 用法: curl -fsSL .../install.sh | apikey=your_key bash
+# 或:   apikey=your_key bash install.sh
 # 或:   echo "your_key" | bash install.sh
 
 set -euo pipefail

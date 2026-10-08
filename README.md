@@ -30,17 +30,7 @@
 ## 快速开始
 
 ```bash
-# 下载并运行
-curl -fsSL https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh -o install.sh
-apikey=your_api_key bash install.sh
-```
-
-或：
-
-```bash
-git clone https://github.com/pingmike2/antseed-gateway.git
-cd antseed-gateway
-apikey=your_api_key bash install.sh
+curl -fsSL https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh | apikey=your_key bash
 ```
 
 ## 配置
