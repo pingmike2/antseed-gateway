@@ -100,9 +100,13 @@ chmod 600 /etc/profile.d/antseed.sh
 source /etc/profile.d/antseed.sh
 
 # 确保 antseed 在 PATH 中
-ANTSEED_BIN=$(which antseed 2>/dev/null || echo "/usr/local/node-v24.21.0/bin/antseed")
-if [ ! -f "$ANTSEED_BIN" ]; then
-    ANTSEED_BIN=$(find /usr/local -name antseed -type f 2>/dev/null | head -1)
+ANTSEED_BIN=""
+if command -v antseed &>/dev/null; then
+    ANTSEED_BIN=$(command -v antseed)
+elif [ -f "/usr/local/node-v24.21.0/bin/antseed" ]; then
+    ANTSEED_BIN="/usr/local/node-v24.21.0/bin/antseed"
+else
+    ANTSEED_BIN=$(find /usr/local -name antseed -type f 2>/dev/null | head -1 || true)
 fi
 if [ -z "$ANTSEED_BIN" ] || [ ! -f "$ANTSEED_BIN" ]; then
     echo -e "${RED}[错误] 找不到 antseed 可执行文件${NC}"
