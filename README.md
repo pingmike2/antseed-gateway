@@ -10,6 +10,23 @@
 - systemd 服务管理
 - OpenAI 兼容 API（`/v1/chat/completions`、`/v1/models`）
 
+## 实测结果（2026-10-08，VPS [REDACTED-IP]）
+
+| 模型 | 状态 | 备注 |
+|------|------|------|
+| deepseek-v4-flash | ✅ | 正常返回 |
+| glm-5.3-flash | ✅ | 正常返回 |
+| minimax-m3 | ✅ | 正常返回 |
+| openai-gpt-oss-120b | ✅ | 正常返回 |
+| gemma-4-e4b | ✅ | 正常返回 |
+| llama-3.1-8b | ✅ | 正常返回 |
+| mistral-nemo | ✅ | 正常返回 |
+| glm-4.7-flash | ❌ | seller 要求 credits（非真免费） |
+| qwen3-235b-instruct | ❌ | peer 连接失败 |
+| nemotron-3-ultra-free | ❌ | peer 连接失败 |
+
+**7/10 免费模型可用**，无需 USDC 押金。
+
 ## 快速开始
 
 ```bash
