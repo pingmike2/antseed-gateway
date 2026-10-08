@@ -216,15 +216,33 @@ import http.server, json, urllib.request, urllib.error
 UPSTREAM = "http://127.0.0.1:8378"
 
 class FreeFilter(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/v1/models":
+            self._filter_models()
+        else:
+            self._proxy()
+
+    def do_POST(self):
+        self._proxy()
+
     def _proxy(self):
         try:
-            req = urllib.request.Request(UPSTREAM + self.path, headers={"Authorization": self.headers.get("Authorization", "")})
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length) if length > 0 else None
+            req = urllib.request.Request(
+                UPSTREAM + self.path,
+                data=body,
+                headers={"Authorization": self.headers.get("Authorization", ""),
+                         "Content-Type": self.headers.get("Content-Type", "application/json")},
+                method="POST" if body else "GET",
+            )
+            with urllib.request.urlopen(req, timeout=300) as resp:
                 body = resp.read()
                 self.send_response(resp.status)
                 for k, v in resp.headers.items():
                     if k.lower() not in ("transfer-encoding", "connection"):
                         self.send_header(k, v)
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
         except Exception as e:
@@ -232,17 +250,12 @@ class FreeFilter(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"error": {"message": str(e)}}).encode())
 
-    def do_GET(self):
-        if self.path == "/v1/models":
-            self._filter_models()
-        else:
-            self._proxy()
-
     def _filter_models(self):
         try:
             req = urllib.request.Request(UPSTREAM + self.path, headers={"Authorization": self.headers.get("Authorization", "")})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read())
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = resp.read()
+                data = json.loads(raw)
             free = []
             for m in data.get("data", []):
                 peers = [p for p in m.get("peers", [])
