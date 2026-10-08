@@ -165,4 +165,4 @@ This is an unofficial, third-party project, not affiliated with or endorsed by A
 
 ## License
 
-[MIT](LICENSE) © 2026 [pingmike2](https://github.com/pingmike2)
+[MIT License](LICENSE) © 2026 [pingmike2](https://github.com/pingmike2)
