@@ -40,28 +40,6 @@ apikey=your_key bash <(wget -qO- https://raw.githubusercontent.com/pingmike2/ant
 FREE_ONLY=0 bash <(wget -qO- https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
 ```
 
-## 配置
-
-安装完成后，编辑 `/root/.antseed/config.json`：
-
-```json
-{
-  "buyer": {
-    "routingPreferences": {
-      "preferFreePeers": true,
-      "maxInputUsdPerMillion": 25,
-      "minTrustScore": 0
-    }
-  }
-}
-```
-
-修改后重启服务：
-
-```bash
-systemctl restart antseed-gateway
-```
-
 ## 使用
 
 ### 查看模型列表
