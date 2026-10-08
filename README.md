@@ -165,4 +165,4 @@ node -v  # 应该是 v24.x
 
 This is an unofficial, third-party project, not affiliated with or endorsed by Antseed or the Antseed Foundation. Free models are served by independent peers on the Antseed P2P network with no guarantee of availability, quality, latency or privacy; requests may be visible to the serving peer. Some models may return errors or charge fees. You are responsible for complying with the Antseed terms, each upstream provider's terms, and applicable laws. The author is not liable for any loss arising from use of this software, including exposing the API endpoint publicly. Use at your own risk.
 
-[MIT](LICENSE) © 2026 luawei1
+[MIT](LICENSE) © 2026 [pingmike2](https://github.com/pingmike2)
