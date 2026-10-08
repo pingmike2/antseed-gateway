@@ -111,6 +111,9 @@ systemctl restart antseed-gateway
 
 # 停止
 systemctl stop antseed-gateway
+
+# 一键卸载（停止服务、删除配置和 systemd unit）
+curl -fsSL https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh | bash -s uninstall
 ```
 
 ## 免费模型

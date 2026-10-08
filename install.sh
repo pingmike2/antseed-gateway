@@ -3,8 +3,23 @@
 # 用法: curl -fsSL .../install.sh | apikey=your_key bash
 # 或:   apikey=your_key bash install.sh
 # 或:   echo "your_key" | bash install.sh
+# 卸载: bash install.sh uninstall
 
 set -euo pipefail
+
+# 卸载模式
+if [ "${1:-}" = "uninstall" ]; then
+    echo "[antseed-gateway] 卸载 Antseed Gateway..."
+    systemctl stop antseed-gateway.service 2>/dev/null || true
+    systemctl disable antseed-gateway.service 2>/dev/null || true
+    rm -f /etc/systemd/system/antseed-gateway.service
+    systemctl daemon-reload
+    rm -rf /root/.antseed
+    rm -f /etc/profile.d/antseed.sh
+    rm -f /usr/local/bin/antseed
+    echo "[antseed-gateway] 卸载完成"
+    exit 0
+fi
 
 # 颜色
 RED='\033[0;31m'
