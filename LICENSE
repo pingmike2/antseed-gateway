@@ -1,21 +1,6 @@
-DISCLAIMER / 免责声明
-
-This is an unofficial, third-party project. It is not affiliated with, endorsed by, or maintained by Antseed or the Antseed Foundation.
-
-本项目为非官方第三方项目,与 Antseed 及 Antseed Foundation 无关联,未经其认可或维护。
-
-- Free ($0) models are served by independent peers on the Antseed P2P network. Availability, quality, latency and privacy are not guaranteed. Requests may be visible to the peer that serves them. Do not send sensitive data.
-- 免费模型由 Antseed P2P 网络上的独立节点提供。可用性、输出质量、延迟和隐私均无保证;请求内容可能被提供服务的节点看到,请勿发送敏感数据。
-- Some listed models may return errors (e.g. 402 credits required, 404/429/502) or charge fees. The "free" label reflects only the advertised peer price at the time of query.
-- 部分模型可能报错(如 402 需充值、404/429/502),或产生费用。"免费"仅指查询时节点公布的报价为 0。
-- You are responsible for complying with the Antseed terms, the terms of each upstream model provider, and all applicable laws. The author is not liable for any direct or indirect loss, cost, or damage arising from use of this software, including exposing an API endpoint to the public. Use at your own risk.
-- 使用者须自行遵守 Antseed 条款、各上游模型提供方条款及所在地法律。因使用本软件(包括对外暴露 API 端口)造成的任何直接或间接损失、费用或损害,作者不承担责任。风险自负。
-
----
-
 MIT License
 
-Copyright (c) 2026 pingmike2
+Copyright (c) 2026 luawei1
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

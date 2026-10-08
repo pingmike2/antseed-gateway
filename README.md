@@ -159,4 +159,10 @@ node -v  # 应该是 v24.x
 
 ## License
 
-MIT
+**免责声明 / Disclaimer**
+
+本项目为非官方第三方项目,与 Antseed 及 Antseed Foundation 无关联,未经其认可或维护。免费模型由 Antseed P2P 网络上的独立节点提供,可用性、输出质量、延迟和隐私均无保证;请求内容可能被提供服务的节点看到,请勿发送敏感数据。部分模型可能报错(如 402 需充值、404/429/502)或产生费用。使用者须自行遵守 Antseed 条款、各上游模型提供方条款及所在地法律。因使用本软件(包括对外暴露 API 端口)造成的任何损失,作者不承担责任,风险自负。
+
+This is an unofficial, third-party project, not affiliated with or endorsed by Antseed or the Antseed Foundation. Free models are served by independent peers on the Antseed P2P network with no guarantee of availability, quality, latency or privacy; requests may be visible to the serving peer. Some models may return errors or charge fees. You are responsible for complying with the Antseed terms, each upstream provider's terms, and applicable laws. The author is not liable for any loss arising from use of this software, including exposing the API endpoint publicly. Use at your own risk.
+
+[MIT](LICENSE) © 2026 luawei1
