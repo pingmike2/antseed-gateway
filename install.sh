@@ -329,17 +329,10 @@ get_realip() {
     ipv6() { curl -6 -sm 2 ip.sb; }
     if [ -z "$ip" ]; then
         echo "[$(ipv6)]"
+    elif curl -4 -sm 2 http://ipinfo.io/org | grep -qE 'Cloudflare|UnReal|AEZA|Andrei'; then
+        echo "[$(ipv6)]"
     else
-        if curl -4 -sm 2 http://ipinfo.io/org | grep -qE 'Cloudflare|UnReal|AEZA|Andrei'; then
-            echo "[$(ipv6)]"
-        else
-            if grep -qE '^\s*precedence\s+::ffff:0:0/96\s+100' "/etc/gai.conf" 2>/dev/null; then
-                echo "$ip"
-            else
-                v6=$(ipv6)
-                [ -n "$v6" ] && echo "[$v6]" || echo "$ip"
-            fi
-        fi
+        echo "$ip"
     fi
 }
 VPS_IP=$(get_realip)
