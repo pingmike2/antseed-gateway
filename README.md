@@ -30,7 +30,7 @@
 ## 快速开始
 
 ```bash
-apikey=your_key bash <(curl -Ls https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
+apikey=your_key bash <(wget -qO- https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
 ```
 
 ## 配置
