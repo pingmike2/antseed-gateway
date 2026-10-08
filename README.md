@@ -10,7 +10,7 @@
 - systemd 服务管理
 - OpenAI 兼容 API（`/v1/chat/completions`、`/v1/models`）
 
-## 实测结果（2026-10-08，VPS [REDACTED-IP]）
+## 实测结果（2026-10-08）
 
 | 模型 | 状态 | 备注 |
 |------|------|------|
