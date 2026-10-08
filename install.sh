@@ -161,22 +161,28 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
+# 获取 VPS IP
+VPS_IP=$(hostname -I | awk '{print $1}')
+if [ -z "$VPS_IP" ]; then
+    VPS_IP=$(curl -s -m 5 ifconfig.me 2>/dev/null || echo "127.0.0.1")
+fi
+
 # 输出信息
 echo ""
 echo "========================================"
 echo "  Antseed Gateway 安装完成"
 echo "========================================"
 echo ""
-echo "  Proxy:  http://127.0.0.1:8377/v1"
+echo "  Proxy:  http://${VPS_IP}:8377/v1"
 echo "  API Key: ${API_KEY}"
 echo ""
 echo "  Hermes 配置:"
-echo "    base_url: http://127.0.0.1:8377/v1"
+echo "    base_url: http://${VPS_IP}:8377/v1"
 echo "    api_key:  ${API_KEY}"
 echo ""
 echo "  常用命令:"
 echo "    systemctl status antseed-gateway"
 echo "    journalctl -u antseed-gateway -f"
-echo "    curl http://127.0.0.1:8377/v1/models"
+echo "    curl http://${VPS_IP}:8377/v1/models"
 echo ""
 echo "========================================"
