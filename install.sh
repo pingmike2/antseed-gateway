@@ -204,6 +204,92 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
+# 可选：只返回免费模型（过滤非免费 peer）
+FREE_ONLY="${FREE_ONLY:-0}"
+if [ "$FREE_ONLY" = "1" ]; then
+    log "启用免费模型过滤..."
+    cat > /usr/local/bin/antseed-free-filter.py <<'PYEOF'
+#!/usr/bin/env python3
+"""Reverse proxy: /v1/models only returns free models; everything else passthrough."""
+import http.server, json, urllib.request, urllib.error
+
+UPSTREAM = "http://127.0.0.1:8378"
+
+class FreeFilter(http.server.BaseHTTPRequestHandler):
+    def _proxy(self):
+        try:
+            req = urllib.request.Request(UPSTREAM + self.path, headers={"Authorization": self.headers.get("Authorization", "")})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                body = resp.read()
+                self.send_response(resp.status)
+                for k, v in resp.headers.items():
+                    if k.lower() not in ("transfer-encoding", "connection"):
+                        self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(body)
+        except Exception as e:
+            self.send_response(502)
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": {"message": str(e)}}).encode())
+
+    def do_GET(self):
+        if self.path == "/v1/models":
+            self._filter_models()
+        else:
+            self._proxy()
+
+    def _filter_models(self):
+        try:
+            req = urllib.request.Request(UPSTREAM + self.path, headers={"Authorization": self.headers.get("Authorization", "")})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+            free = []
+            for m in data.get("data", []):
+                peers = [p for p in m.get("peers", [])
+                         if p.get("inputUsdPerMillion", 999) == 0 and p.get("outputUsdPerMillion", 999) == 0]
+                if peers:
+                    m["peers"] = peers
+                    free.append(m)
+            data["data"] = free
+            out = json.dumps(data).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+        except Exception as e:
+            self.send_response(502)
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": {"message": str(e)}}).encode())
+
+    def log_message(self, fmt, *args):
+        pass
+
+if __name__ == "__main__":
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", 8377), FreeFilter)
+    server.serve_forever()
+PYEOF
+    chmod +x /usr/local/bin/antseed-free-filter.py
+    cat > /etc/systemd/system/antseed-gateway.service <<EOF
+[Unit]
+Description=Antseed Gateway (free model filter)
+After=network.target antseed-buyer.service
+Requires=antseed-buyer.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/antseed-free-filter.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+
 systemctl daemon-reload
 systemctl reenable antseed-gateway.service >/dev/null 2>&1
 
