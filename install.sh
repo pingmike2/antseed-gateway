@@ -10,13 +10,36 @@ set -euo pipefail
 # 卸载模式
 if [ "${1:-}" = "uninstall" ]; then
     echo "[antseed-gateway] 卸载 Antseed Gateway..."
-    systemctl stop antseed-gateway.service antseed-buyer.service 2>/dev/null || true
-    systemctl disable antseed-gateway.service antseed-buyer.service 2>/dev/null || true
-    rm -f /etc/systemd/system/antseed-gateway.service /etc/systemd/system/antseed-buyer.service
+    # 1. 停止并移除服务
+    systemctl stop antseed-gateway.service antseed-buyer.service antseed-free-filter.service 2>/dev/null || true
+    systemctl disable antseed-gateway.service antseed-buyer.service antseed-free-filter.service 2>/dev/null || true
+    rm -f /etc/systemd/system/antseed-gateway.service /etc/systemd/system/antseed-buyer.service /etc/systemd/system/antseed-free-filter.service
     systemctl daemon-reload
+    systemctl reset-failed 2>/dev/null || true
+    # 2. 兜底:杀掉残留进程(端口 8377/8378 占用)
+    pkill -f "antseed buyer start" 2>/dev/null || true
+    pkill -f "antseed-free-filter.py" 2>/dev/null || true
+    pkill -f "antseed gateway start" 2>/dev/null || true
+    # 3. 本地数据与配置
     rm -rf /root/.antseed
     rm -f /etc/profile.d/antseed.sh
-    rm -f /usr/local/bin/antseed
+    # 4. 安装脚本写入的脚本文件
+    rm -f /usr/local/bin/antseed-free-filter.py
+    # 5. 命令链接:只删指向本脚本安装目录的链接,不误删系统已有的 node/npm
+    NODE_DIR="/usr/local/node-v24.21.0"
+    for f in antseed node npm npx; do
+        link="/usr/local/bin/${f}"
+        if [ -L "$link" ] && readlink "$link" | grep -q "^${NODE_DIR}/"; then
+            rm -f "$link"
+        fi
+    done
+    # 6. 删除本脚本安装的 Node 及其全局包(@antseed/cli 随之删除)
+    rm -rf "$NODE_DIR"
+    # 7. 验证残留
+    left=$(ss -ltn 2>/dev/null | grep -cE ':(8377|8378)\b' || true)
+    if [ "$left" -gt 0 ]; then
+        echo "[antseed-gateway] 警告:端口 8377/8378 仍被占用,请执行: ss -ltnp | grep -E '8377|8378'"
+    fi
     echo "[antseed-gateway] 卸载完成"
     exit 0
 fi
@@ -168,131 +191,113 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
-# 创建 gateway API key
-log "创建 API key..."
-export ANTSEED_IDENTITY_HEX=${IDENTITY_HEX}
-GATEWAY_KEY=$(/usr/local/bin/antseed gateway key create --label hermes --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',''))" 2>/dev/null || echo "")
-if [ -z "$GATEWAY_KEY" ]; then
-    # 尝试非 JSON 格式
-    GATEWAY_KEY=$(/usr/local/bin/antseed gateway key create --label hermes 2>&1 | grep -oP 'antseed_[A-Za-z0-9]+' | head -1 || echo "")
-fi
-if [ -z "$GATEWAY_KEY" ]; then
-    warn "无法创建 API key，使用用户提供的 key"
-    GATEWAY_KEY="${API_KEY}"
-fi
-log "API key: ${GATEWAY_KEY:0:12}..."
-
-# 创建 gateway service（监听 0.0.0.0:8377，转发到 buyer 8378）
-cat > /etc/systemd/system/antseed-gateway.service <<EOF
-[Unit]
-Description=Antseed Gateway (public API)
-After=network.target antseed-buyer.service
-Requires=antseed-buyer.service
-
-[Service]
-Type=simple
-User=root
-Environment="ANTSEED_IDENTITY_HEX=${IDENTITY_HEX}"
-Environment="ANTSEED_API_KEY=${GATEWAY_KEY}"
-ExecStart=/usr/local/bin/antseed gateway start --host 0.0.0.0 --port 8377 --buyer-port 8378
-Restart=on-failure
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# 可选：只返回免费模型（过滤非免费 peer）
 FREE_ONLY="${FREE_ONLY:-1}"
-if [ "$FREE_ONLY" = "1" ]; then
-    log "启用免费模型过滤..."
-    cat > /usr/local/bin/antseed-free-filter.py <<'PYEOF'
+# 对外网关:filter 自己鉴权(用户传入的 apikey 即唯一访问凭证),转发到内部 buyer
+log "写入对外网关 (filter)..."
+cat > /usr/local/bin/antseed-free-filter.py <<'PYEOF'
 #!/usr/bin/env python3
-"""Reverse proxy: /v1/models only returns free models; everything else passthrough."""
-import http.server, json, urllib.request, urllib.error
+"""对外 OpenAI 兼容网关:Bearer 鉴权 + 转发到内部 buyer(127.0.0.1:8378)。
+FREE_ONLY=1 时 /v1/models 只返回存在 $0 报价 peer 的模型。"""
+import http.server, json, os, socketserver, urllib.request, urllib.error
 
 UPSTREAM = "http://127.0.0.1:8378"
+API_KEY = os.environ.get("ANTSEED_API_KEY", "")
+FREE_ONLY = os.environ.get("FREE_ONLY", "1") == "1"
+LISTEN = ("0.0.0.0", int(os.environ.get("GATEWAY_PORT", "8377")))
 
-class FreeFilter(http.server.BaseHTTPRequestHandler):
+def is_free(p):
+    return p.get("inputUsdPerMillion", 999) == 0 and p.get("outputUsdPerMillion", 999) == 0
+
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def _auth_ok(self):
+        if not API_KEY:
+            return True
+        return self.headers.get("Authorization", "") == f"Bearer {API_KEY}"
+
+    def _send(self, status, body, ctype="application/json"):
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _err(self, status, msg):
+        self._send(status, json.dumps({"error": {"message": msg}}).encode())
+
+    def _forward(self):
+        if not self._auth_ok():
+            return self._err(401, "invalid api key")
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(length) if length > 0 else None
+        req = urllib.request.Request(UPSTREAM + self.path, data=body, method=self.command,
+                                     headers={"Content-Type": self.headers.get("Content-Type", "application/json")})
+        try:
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                data = resp.read()
+                self._send(resp.status, data, resp.headers.get("Content-Type", "application/json"))
+        except urllib.error.HTTPError as e:
+            self._send(e.code, e.read() or b"{}")
+        except Exception as e:
+            self._err(502, f"upstream error: {e}")
+
     def do_GET(self):
-        if self.path == "/v1/models":
-            self._filter_models()
-        else:
-            self._proxy()
+        if self.path.split("?")[0] == "/v1/models" and FREE_ONLY:
+            return self._models_free()
+        if self.path == "/health":
+            return self._send(200, b'{"ok":true}')
+        return self._forward()
+
+    def do_HEAD(self):
+        return self._forward()
 
     def do_POST(self):
-        self._proxy()
+        return self._forward()
 
-    def _proxy(self):
+    def _models_free(self):
+        if not self._auth_ok():
+            return self._err(401, "invalid api key")
         try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length) if length > 0 else None
-            req = urllib.request.Request(
-                UPSTREAM + self.path,
-                data=body,
-                headers={"Authorization": self.headers.get("Authorization", ""),
-                         "Content-Type": self.headers.get("Content-Type", "application/json")},
-                method="POST" if body else "GET",
-            )
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                body = resp.read()
-                self.send_response(resp.status)
-                for k, v in resp.headers.items():
-                    if k.lower() not in ("transfer-encoding", "connection"):
-                        self.send_header(k, v)
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+            with urllib.request.urlopen(UPSTREAM + "/v1/models", timeout=120) as resp:
+                data = json.loads(resp.read())
         except Exception as e:
-            self.send_response(502)
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": {"message": str(e)}}).encode())
-
-    def _filter_models(self):
-        try:
-            req = urllib.request.Request(UPSTREAM + self.path, headers={"Authorization": self.headers.get("Authorization", "")})
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                raw = resp.read()
-                data = json.loads(raw)
-            free = []
-            for m in data.get("data", []):
-                peers = [p for p in m.get("peers", [])
-                         if p.get("inputUsdPerMillion", 999) == 0 and p.get("outputUsdPerMillion", 999) == 0]
-                if peers:
-                    m["peers"] = peers
-                    free.append(m)
-            data["data"] = free
-            out = json.dumps(data).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(out)))
-            self.end_headers()
-            self.wfile.write(out)
-        except Exception as e:
-            self.send_response(502)
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": {"message": str(e)}}).encode())
+            return self._err(502, f"upstream error: {e}")
+        out = []
+        for m in data.get("data", []):
+            peers = [p for p in m.get("peers", []) if is_free(p)]
+            if peers:
+                m["peers"] = peers
+                out.append(m)
+        data["data"] = out
+        self._send(200, json.dumps(data, ensure_ascii=False).encode())
 
     def log_message(self, fmt, *args):
         pass
 
+class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
 if __name__ == "__main__":
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", 8377), FreeFilter)
-    server.serve_forever()
+    S(LISTEN, H).serve_forever()
 PYEOF
-    chmod +x /usr/local/bin/antseed-free-filter.py
-    cat > /etc/systemd/system/antseed-gateway.service <<EOF
+chmod +x /usr/local/bin/antseed-free-filter.py
+
+cat > /etc/systemd/system/antseed-gateway.service <<EOF
 [Unit]
-Description=Antseed Gateway (free model filter)
+Description=Antseed Gateway (public OpenAI-compatible API)
 After=network.target antseed-buyer.service
 Requires=antseed-buyer.service
 
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/antseed-free-filter.py
+Environment="ANTSEED_API_KEY=${API_KEY}"
+Environment="FREE_ONLY=${FREE_ONLY}"
+Environment="GATEWAY_PORT=8377"
+ExecStart=/usr/bin/python3 /usr/local/bin/antseed-free-filter.py
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -301,34 +306,21 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-fi
 
 systemctl daemon-reload
-systemctl reenable antseed-gateway.service >/dev/null 2>&1
-
-# 启动 gateway
-log "启动 Antseed Gateway..."
+systemctl enable antseed-gateway.service >/dev/null 2>&1
+log "启动对外网关..."
 systemctl restart antseed-gateway.service
-sleep 5
+sleep 3
 
-# 检查状态
 if systemctl is-active --quiet antseed-gateway.service && systemctl is-active --quiet antseed-buyer.service; then
-    log "Antseed Gateway 运行中"
+    log "服务运行中"
 else
-    warn "服务启动失败，查看日志: journalctl -u antseed-gateway -n 50"
+    warn "服务启动失败,查看日志: journalctl -u antseed-gateway -n 50"
     exit 1
 fi
 
-# 等待 proxy 就绪
-log "等待 proxy 就绪..."
-for i in $(seq 1 30); do
-    if curl -s -m 2 http://127.0.0.1:8377/v1/models >/dev/null 2>&1; then
-        break
-    fi
-    sleep 2
-done
-
-# 获取真实 IP（优先 IPv6，避免内网地址）
+# 获取真实 IP(优先 IPv4 公网,必要时回退 IPv6)
 get_realip() {
     ip=$(curl -4 -sm 2 ip.sb)
     ipv6() { curl -6 -sm 2 ip.sb; }
@@ -349,22 +341,22 @@ get_realip() {
 }
 VPS_IP=$(get_realip)
 
-# 输出信息
 echo ""
 echo "========================================"
 echo "  Antseed Gateway 安装完成"
 echo "========================================"
 echo ""
-echo "  Proxy:  http://${VPS_IP}:8377/v1"
-echo "  API Key: ${GATEWAY_KEY}"
+echo "  Proxy:   http://${VPS_IP}:8377/v1"
+echo "  API Key: ${API_KEY}"
+echo "  模型过滤: FREE_ONLY=${FREE_ONLY}(1=仅免费,0=全部)"
 echo ""
 echo "  Hermes 配置:"
 echo "    base_url: http://${VPS_IP}:8377/v1"
-echo "    api_key:  ${GATEWAY_KEY}"
+echo "    api_key:  ${API_KEY}"
 echo ""
 echo "  常用命令:"
 echo "    systemctl status antseed-gateway"
 echo "    journalctl -u antseed-gateway -f"
-echo "    curl http://${VPS_IP}:8377/v1/models | python3 -c "import sys,json; m=json.load(sys.stdin)['data']; print(f'  Total: {len(m)} models'); free=[x for x in m if any(p.get('inputUsdPerMillion',999)==0 and p.get('outputUsdPerMillion',999)==0 for p in x.get('peers',[]))]; print(f'  Free: {len(free)} models'); [print(f'    - {x[\"id\"]}') for x in free[:20]]""
+echo "    curl -H \"Authorization: Bearer ${API_KEY}\" http://127.0.0.1:8377/v1/models"
 echo ""
 echo "========================================"
