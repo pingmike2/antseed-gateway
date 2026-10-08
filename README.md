@@ -116,7 +116,10 @@ curl -fsSL https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/inst
 查看实时报价：
 
 ```bash
-curl -s https://network.antseed.com/stats | jq '.peers[].providers[].services'
+curl -s https://network.antseed.com/stats | jq -r '
+  [.peers[].providers[].servicePricing // {} | to_entries[]
+   | select(.value.inputUsdPerMillion == 0 and .value.outputUsdPerMillion == 0)
+   | .key] | unique | .[]'
 ```
 
 ## 故障排查
