@@ -198,12 +198,12 @@ cat > /usr/local/bin/antseed-free-filter.py <<'PYEOF'
 #!/usr/bin/env python3
 """对外 OpenAI 兼容网关:Bearer 鉴权 + 转发到内部 buyer(127.0.0.1:8378)。
 FREE_ONLY=1 时 /v1/models 只返回 type=text 且存在 $0 报价 peer 的模型。"""
-import http.server, json, os, socketserver, urllib.request, urllib.error
+import http.server, json, os, socket, socketserver, urllib.request, urllib.error
 
 UPSTREAM = "http://127.0.0.1:8378"
 API_KEY = os.environ.get("ANTSEED_API_KEY", "")
 FREE_ONLY = os.environ.get("FREE_ONLY", "1") == "1"
-LISTEN = ("0.0.0.0", int(os.environ.get("GATEWAY_PORT", "8377")))
+LISTEN = ("::", int(os.environ.get("GATEWAY_PORT", "8377")))  # 双栈:同时接受 IPv4 与 IPv6
 
 def is_free(p):
     return p.get("inputUsdPerMillion", 999) == 0 and p.get("outputUsdPerMillion", 999) == 0
@@ -280,6 +280,10 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
 class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    address_family = socket.AF_INET6
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
     daemon_threads = True
     allow_reuse_address = True
 
