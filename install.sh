@@ -32,7 +32,7 @@ warn() { echo -e "${YELLOW}[antseed-gateway]${NC} $*"; }
 err()  { echo -e "${RED}[antseed-gateway]${NC} $*" >&2; exit 1; }
 
 # 获取 API key（可选，不传则自动生成）
-API_KEY="${apikey}"
+API_KEY="${apikey:-}"
 if [ -z "$API_KEY" ]; then
     # 尝试从 stdin 读取
     if [ ! -t 0 ]; then
@@ -266,6 +266,6 @@ echo ""
 echo "  常用命令:"
 echo "    systemctl status antseed-gateway"
 echo "    journalctl -u antseed-gateway -f"
-echo "    curl http://${VPS_IP}:8377/v1/models"
+echo "    curl http://${VPS_IP}:8377/v1/models | python3 -c "import sys,json; m=json.load(sys.stdin)['data']; print(f'  Total: {len(m)} models'); free=[x for x in m if any(p.get('inputUsdPerMillion',999)==0 and p.get('outputUsdPerMillion',999)==0 for p in x.get('peers',[]))]; print(f'  Free: {len(free)} models'); [print(f'    - {x[\"id\"]}') for x in free[:20]]""
 echo ""
 echo "========================================"

@@ -150,7 +150,7 @@ journalctl -u antseed-gateway -n 100
 
 ```bash
 # 检查网络连通性
-curl -s http://127.0.0.1:8377/v1/models | jq '.data[].id' | head
+curl -s http://127.0.0.1:8377/v1/models | python3 -c "import sys,json; m=json.load(sys.stdin)['data']; free=[x for x in m if any(p.get('inputUsdPerMillion',999)==0 and p.get('outputUsdPerMillion',999)==0 for p in x.get('peers',[]))]; print(f'Free: {len(free)} models'); [print(f'  - {x[\"id\"]}') for x in free[:20]]"
 
 # 检查日志
 journalctl -u antseed-gateway -n 50 | grep -i error
