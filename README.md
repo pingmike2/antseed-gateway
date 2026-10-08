@@ -29,6 +29,11 @@
 
 ## 快速开始
 
+> **适用环境**
+> - ✅ 有公网 IPv4 的 VPS
+> - ✅ 纯 IPv6 VPS,并套 WARP(已实测可用)
+> - ❌ NAT VPS(无公网端口映射,例如 Alpine/128MB 小机)不支持:buyer 常驻约 240MB 内存,且 Alpine 上官方 Node 24 不可用
+
 ```bash
 # 不传 apikey 则自动生成；默认只返回免费模型
 bash <(wget -qO- https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
