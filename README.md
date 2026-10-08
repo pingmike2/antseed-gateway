@@ -30,11 +30,14 @@
 ## 快速开始
 
 ```bash
-# 不传 apikey 则自动生成
+# 不传 apikey 则自动生成；默认只返回免费模型
 bash <(wget -qO- https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
 
 # 或自定义 apikey
 apikey=your_key bash <(wget -qO- https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
+
+# 返回全部模型（含付费）
+FREE_ONLY=0 bash <(wget -qO- https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
 ```
 
 ## 配置

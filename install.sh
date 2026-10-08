@@ -205,7 +205,7 @@ WantedBy=multi-user.target
 EOF
 
 # 可选：只返回免费模型（过滤非免费 peer）
-FREE_ONLY="${FREE_ONLY:-0}"
+FREE_ONLY="${FREE_ONLY:-1}"
 if [ "$FREE_ONLY" = "1" ]; then
     log "启用免费模型过滤..."
     cat > /usr/local/bin/antseed-free-filter.py <<'PYEOF'
