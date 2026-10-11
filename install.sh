@@ -198,7 +198,9 @@ cat > /usr/local/bin/antseed-free-filter.py <<'PYEOF'
 #!/usr/bin/env python3
 """对外 OpenAI 兼容网关:Bearer 鉴权 + 转发到内部 buyer(127.0.0.1:8378)。
 FREE_ONLY=1 时 /v1/models 只返回 type=text 且存在 $0 报价 peer 的模型。"""
-import http.server, json, os, socket, socketserver, urllib.request, urllib.error
+import http.server, json, os, socket, socketserver, subprocess, urllib.request, urllib.error
+
+ROTATE_SCRIPT = "/usr/local/bin/antseed-rotate-identity.sh"
 
 UPSTREAM = "http://127.0.0.1:8378"
 API_KEY = os.environ.get("ANTSEED_API_KEY", "")
@@ -239,7 +241,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 data = resp.read()
                 self._send(resp.status, data, resp.headers.get("Content-Type", "application/json"))
         except urllib.error.HTTPError as e:
-            self._send(e.code, e.read() or b"{}")
+            body = e.read() or b"{}"
+            if e.code == 402:
+                self._trigger_rotate()
+            self._send(e.code, body)
         except Exception as e:
             self._err(502, f"upstream error: {e}")
 
@@ -279,6 +284,16 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def _trigger_rotate(self):
+        if not os.path.exists(ROTATE_SCRIPT):
+            return
+        if os.path.exists("/tmp/antseed-rotate.lock"):
+            return
+        try:
+            subprocess.Popen([ROTATE_SCRIPT], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
 class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
     address_family = socket.AF_INET6
     def server_bind(self):
@@ -291,6 +306,50 @@ if __name__ == "__main__":
     S(LISTEN, H).serve_forever()
 PYEOF
 chmod +x /usr/local/bin/antseed-free-filter.py
+
+# 402 自动切换节点身份的看门狗脚本
+cat > /usr/local/bin/antseed-rotate-identity.sh <<'SHEOF'
+#!/bin/sh
+# 检测到 402 (AntSeed credits 用尽) 时,轮换节点身份并重启 buyer。
+# 由 antseed-free-filter.py 在 402 时后台触发。
+set -u
+LOCK="/tmp/antseed-rotate.lock"
+IDENTITY_HEX=$(openssl rand -hex 32)
+U=/etc/systemd/system/antseed-buyer.service
+P=/etc/profile.d/antseed.sh
+
+# 防并发:锁存在说明上一次切换还没完成
+if [ -f "$LOCK" ]; then
+    exit 0
+fi
+touch "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
+
+# 记录轮换日志(方便排查)
+echo "$(date '+%F %T') rotate-identity -> ${IDENTITY_HEX:0:16}..." >> /var/log/antseed-rotate.log
+
+# 1) 更新 profile.d 中的身份(保持唯一来源)
+[ -f "$P" ] && sed -i "s/export ANTSEED_IDENTITY_HEX=.*/export ANTSEED_IDENTITY_HEX=${IDENTITY_HEX}/" "$P"
+
+# 2) 更新 systemd unit 的 Environment 并重载重启 buyer
+if [ -f "$U" ]; then
+    sed -i 's/ANTSEED_IDENTITY_HEX=[^"]*/ANTSEED_IDENTITY_HEX='"${IDENTITY_HEX}"'/' "$U"
+    systemctl daemon-reload
+    systemctl restart antseed-buyer.service
+fi
+
+# 3) 等待 buyer 就绪(轮询内部 8378,最长 120s)
+i=0
+while [ $i -lt 120 ]; do
+    if curl -s -m 2 http://127.0.0.1:8378/v1/models >/dev/null 2>&1; then
+        break
+    fi
+    i=$((i+2))
+    sleep 2
+done
+SHEOF
+chmod +x /usr/local/bin/antseed-rotate-identity.sh
+
 
 cat > /etc/systemd/system/antseed-gateway.service <<EOF
 [Unit]
