@@ -322,9 +322,12 @@ IDENTITY_HEX=$(openssl rand -hex 32)
 U=/etc/systemd/system/antseed-buyer.service
 P=/etc/profile.d/antseed.sh
 
-# 防并发:锁存在说明上一次切换还没完成
+# 防并发:锁存在说明上一次切换还没完成(超过 300s 视为失效,防止残留锁永久卡死)
 if [ -f "$LOCK" ]; then
-    exit 0
+    if [ "$(($(date +%s) - $(stat -c %Y "$LOCK" 2>/dev/null || echo 0)))" -lt 300 ]; then
+        exit 0
+    fi
+    rm -f "$LOCK"
 fi
 touch "$LOCK"
 trap 'rm -f "$LOCK"' EXIT
