@@ -282,7 +282,10 @@ class H(http.server.BaseHTTPRequestHandler):
         self._send(200, json.dumps(data, ensure_ascii=False).encode())
 
     def log_message(self, fmt, *args):
-        os.waitpid(-1, os.WNOHANG)
+        try:
+            os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            pass
         pass
 
     def _trigger_rotate(self):
