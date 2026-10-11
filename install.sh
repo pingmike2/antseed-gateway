@@ -326,7 +326,7 @@ touch "$LOCK"
 trap 'rm -f "$LOCK"' EXIT
 
 # 记录轮换日志(方便排查)
-echo "$(date +%F %T) rotate-identity -> $(echo ${IDENTITY_HEX} | dd bs=1 count=16 2>/dev/null)..." >> /var/log/antseed-rotate.log
+echo "$(date -Iseconds) rotate-identity -> $(echo ${IDENTITY_HEX} | dd bs=1 count=16 2>/dev/null)..." >> /var/log/antseed-rotate.log
 
 # 1) 更新 profile.d 中的身份(保持唯一来源)
 [ -f "$P" ] && sed -i "s/export ANTSEED_IDENTITY_HEX=.*/export ANTSEED_IDENTITY_HEX=${IDENTITY_HEX}/" "$P"
