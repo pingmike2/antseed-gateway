@@ -106,6 +106,27 @@ systemctl stop antseed-gateway
 curl -fsSL https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh | bash -s uninstall
 ```
 
+### 手动轮换节点身份（402 刷新额度）
+
+`402 out of AntSeed credits` 表示当前 buyer 身份的免费额度用尽。正常情况下网关检测到 402 会**自动轮换身份并重启 buyer**（无需重装）；如果心急想立即刷新，手动执行:
+
+```bash
+# 立即轮换身份（生成新身份 → 重启 buyer → 等待就绪,约 15-20 秒）
+/usr/local/bin/antseed-rotate-identity.sh
+
+# 查看轮换记录（确认是否刷新）
+tail -5 /var/log/antseed-rotate.log
+
+# 查看当前身份
+grep ANTSEED_IDENTITY_HEX /etc/systemd/system/antseed-buyer.service
+```
+
+说明:
+
+- 轮换只换 buyer 节点身份,API key、配置、模型列表全部保留,不需要重装。
+- 脚本自带防并发锁 `/tmp/antseed-rotate.lock`,锁超 300 秒自动失效,不会永久卡死。
+- 执行前先看 `rotate.log` 有没有刚刷新的记录,避免与自动轮换撞锁。
+
 ## 免费模型
 
 当前可用的 $0 模型（需网络连通）：
