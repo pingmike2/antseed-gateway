@@ -93,20 +93,43 @@ apt-get update -qq
 apt-get install -y -qq curl wget git build-essential python3 sqlite3 >/dev/null 2>&1
 
 # 安装 Node 24
+# 优先使用系统已安装的 Node（要求 >= v24）。若系统已有可用 Node，则不下载、
+# 不覆盖系统 node/npm/npx，直接沿用，避免破坏系统环境。
 NODE_VERSION="v24.21.0"
 NODE_DIR="/usr/local/node-${NODE_VERSION}"
-if [ ! -x "${NODE_DIR}/bin/node" ]; then
-    log "安装 Node ${NODE_VERSION}..."
-    cd /tmp
-    wget -q "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"
-    mkdir -p "$NODE_DIR"
-    tar xf "node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" -C "$NODE_DIR" --strip-components=1
-    rm -f "node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"
+SYSTEM_NODE="${SYSTEM_NODE:-1}"   # 置 0 可强制走内置 v24.21.0 安装
+
+USE_SYSTEM=0
+if [ "$SYSTEM_NODE" != "0" ] && command -v node >/dev/null 2>&1; then
+    NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+    if [ -n "$NODE_MAJOR" ] && [ "$NODE_MAJOR" -ge 24 ] 2>/dev/null; then
+        USE_SYSTEM=1
+    fi
 fi
-export PATH="${NODE_DIR}/bin:$PATH"
-ln -sf "${NODE_DIR}/bin/node" /usr/local/bin/node
-ln -sf "${NODE_DIR}/bin/npm"  /usr/local/bin/npm
-ln -sf "${NODE_DIR}/bin/npx"  /usr/local/bin/npx
+
+if [ "$USE_SYSTEM" = "1" ]; then
+    # 复用系统 Node：npm/npx 同样来自系统 PATH
+    SYSTEM_NODE_BIN="$(dirname "$(command -v node)")"
+    SYSTEM_NPM="$(command -v npm || true)"
+    export PATH="$SYSTEM_NODE_BIN:$PATH"
+    log "检测到系统 Node $(node -v)，直接使用（跳过下载 v24.21.0）"
+    if [ -z "$SYSTEM_NPM" ]; then
+        warn "未在 PATH 找到 npm，尝试用系统 node 全局安装 @antseed/cli 时可能失败"
+    fi
+else
+    if [ ! -x "${NODE_DIR}/bin/node" ]; then
+        log "安装 Node ${NODE_VERSION}..."
+        cd /tmp
+        wget -q "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"
+        mkdir -p "$NODE_DIR"
+        tar xf "node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" -C "$NODE_DIR" --strip-components=1
+        rm -f "node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"
+    fi
+    export PATH="${NODE_DIR}/bin:$PATH"
+    ln -sf "${NODE_DIR}/bin/node" /usr/local/bin/node
+    ln -sf "${NODE_DIR}/bin/npm"  /usr/local/bin/npm
+    ln -sf "${NODE_DIR}/bin/npx"  /usr/local/bin/npx
+fi
 log "Node $(node -v) 已就绪"
 
 # 安装 Antseed CLI
@@ -394,13 +417,17 @@ else
 fi
 
 # 获取真实 IP(优先 IPv4 公网,必要时回退 IPv6)
+# IPv6 以 [..] 包裹以保证 URL 合法;若 IPv4/IPv6 都拿不到,回退 127.0.0.1,保证输出永不为空。
 get_realip() {
-    ip=$(curl -4 -sm 2 ip.sb)
-    ipv6() { curl -6 -sm 2 ip.sb; }
+    local ip="" ip6=""
+    ip=$(curl -4 -sm 2 ip.sb) || true
+    ipv6() { curl -6 -sm 2 ip.sb || true; }
     if [ -z "$ip" ]; then
-        echo "[$(ipv6)]"
+        ip6=$(ipv6)
+        if [ -n "$ip6" ]; then echo "[$ip6]"; else echo "127.0.0.1"; fi
     elif curl -4 -sm 2 http://ipinfo.io/org | grep -qE 'Cloudflare|UnReal|AEZA|Andrei'; then
-        echo "[$(ipv6)]"
+        ip6=$(ipv6)
+        if [ -n "$ip6" ]; then echo "[$ip6]"; else echo "127.0.0.1"; fi
     else
         echo "$ip"
     fi
