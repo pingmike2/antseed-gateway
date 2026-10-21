@@ -57,9 +57,9 @@ err()  { echo -e "${RED}[antseed-gateway]${NC} $*" >&2; exit 1; }
 # 获取 API key（可选，不传则自动生成）
 API_KEY="${apikey:-}"
 if [ -z "$API_KEY" ]; then
-    # 尝试从 stdin 读取
+    # 尝试从 stdin 读取(非交互/EOF 时跳过,走自动生成)
     if [ ! -t 0 ]; then
-        read -r API_KEY
+        read -r API_KEY || API_KEY=""
     fi
 fi
 if [ -z "$API_KEY" ]; then
