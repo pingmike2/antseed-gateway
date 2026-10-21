@@ -136,18 +136,23 @@ log "Node $(node -v) 已就绪"
 log "安装 @antseed/cli..."
 npm install -g @antseed/cli --no-audit --no-fund 2>&1 | tail -3
 
+# 免费模型开关(默认 1;FREE_ONLY=0 返回全部模型)
+FREE_ONLY="${FREE_ONLY:-1}"
+
 # 生成 identity
 IDENTITY_HEX=$(openssl rand -hex 32)
 log "生成节点身份: ${IDENTITY_HEX:0:16}..."
 
-# 配置 Antseed
+# 配置 Antseed:FREE_ONLY=1 时把路由价格上限压到 0,buyer 只走 $0 报价 peer(减少被路由进付费 peer 吃 402)
+if [ "$FREE_ONLY" = "1" ]; then PRICE_CAP=0; else PRICE_CAP=25; fi
 mkdir -p /root/.antseed
 cat > /root/.antseed/config.json <<EOF
 {
   "buyer": {
     "routingPreferences": {
       "preferFreePeers": true,
-      "maxInputUsdPerMillion": 25,
+      "maxInputUsdPerMillion": ${PRICE_CAP},
+      "maxOutputUsdPerMillion": ${PRICE_CAP},
       "minTrustScore": 0
     }
   }
@@ -214,123 +219,472 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
-FREE_ONLY="${FREE_ONLY:-1}"
 # 对外网关:filter 自己鉴权(用户传入的 apikey 即唯一访问凭证),转发到内部 buyer
 log "写入对外网关 (filter)..."
 cat > /usr/local/bin/antseed-free-filter.py <<'PYEOF'
 #!/usr/bin/env python3
-"""对外 OpenAI 兼容网关:Bearer 鉴权 + 转发到内部 buyer(127.0.0.1:8378)。
-FREE_ONLY=1 时 /v1/models 只返回 type=text 且存在 $0 报价 peer 的模型。"""
-import http.server, json, os, socket, socketserver, subprocess, urllib.request, urllib.error
+"""Antseed 对外 OpenAI 兼容网关(改进版)
 
-ROTATE_SCRIPT = "/usr/local/bin/antseed-rotate-identity.sh"
+相比原版:
+  1. 后台探活:定期对每个候选模型发 max_tokens=1 的小请求,/v1/models 只返回最近探测通过的模型
+  2. 失败回退:402/404/429/5xx/连接失败/首字节超时 -> 自动换下一个健康模型(可关)
+  3. 失败拉黑:连续失败的模型冷却一段时间,不再被路由
+  4. 流式透传:stream=true 时边收边发(chunked),不再整段缓冲
+  5. 鉴权:必须设置 API key(除非显式 ALLOW_NO_AUTH=1),常量时间比较
+  6. 402 自动换身份:AUTO_ROTATE=1 时,先轮换节点身份再重试同一模型;
+     轮换后仍 402 → 判定为真·付费模型,拉黑并走回退
+  7. 模型名 "auto" / "antseed" -> 自动选当前最快的健康模型
 
-UPSTREAM = "http://127.0.0.1:8378"
+只依赖 Python 3 标准库。
+"""
+import hmac
+import http.client
+import http.server
+import json
+import os
+import socket
+import socketserver
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+# ---------------- 配置 ----------------
+UPSTREAM = os.environ.get("UPSTREAM", "http://127.0.0.1:8378")
 API_KEY = os.environ.get("ANTSEED_API_KEY", "")
+ALLOW_NO_AUTH = os.environ.get("ALLOW_NO_AUTH", "0") == "1"
 FREE_ONLY = os.environ.get("FREE_ONLY", "1") == "1"
-LISTEN = ("::", int(os.environ.get("GATEWAY_PORT", "8377")))  # 双栈:同时接受 IPv4 与 IPv6
+PORT = int(os.environ.get("GATEWAY_PORT", "8377"))
+BIND = os.environ.get("GATEWAY_BIND", "::")
+
+PROBE_INTERVAL = int(os.environ.get("PROBE_INTERVAL", "300"))      # 探活周期(秒)
+PROBE_TIMEOUT = int(os.environ.get("PROBE_TIMEOUT", "45"))         # 单次探活超时
+PROBE_WORKERS = int(os.environ.get("PROBE_WORKERS", "4"))          # 并发探活数
+HEALTHY_TTL = int(os.environ.get("HEALTHY_TTL", str(PROBE_INTERVAL * 3)))  # 成功结果有效期
+FAIL_THRESHOLD = int(os.environ.get("FAIL_THRESHOLD", "2"))        # 连续失败几次拉黑
+BLACKLIST_SECONDS = int(os.environ.get("BLACKLIST_SECONDS", "900"))
+
+AUTO_FALLBACK = os.environ.get("AUTO_FALLBACK", "1") == "1"        # 失败自动换模型
+MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))            # 单请求最多尝试几个模型
+# 优先回退顺序(逗号分隔),不在其中的健康模型按延迟排在后面
+FALLBACK_ORDER = [m.strip() for m in os.environ.get("FALLBACK_ORDER", "").split(",") if m.strip()]
+STREAM_IDLE_TIMEOUT = int(os.environ.get("STREAM_IDLE_TIMEOUT", "90"))   # 流式:两次收包最长间隔
+NONSTREAM_TIMEOUT = int(os.environ.get("NONSTREAM_TIMEOUT", "300"))     # 非流式:整体等待
+AUTO_NAMES = {"auto", "antseed"}
+RETRYABLE = {402, 404, 408, 409, 425, 429, 500, 502, 503, 504}
+
+# 402 自动换身份:先轮换节点身份重试,换身份后仍 402 才判定该模型需要付费
+AUTO_ROTATE = os.environ.get("AUTO_ROTATE", "1") == "1"
+ROTATE_SCRIPT = os.environ.get("ROTATE_SCRIPT", "/usr/local/bin/antseed-rotate-identity.sh")
+BUYER_UNIT = "/etc/systemd/system/antseed-buyer.service"
+_rotate_lock = threading.Lock()
+_credit_models = set()
+_probe_402 = set()
+
+# 上游是本机 buyer,绕过系统 http_proxy 环境变量
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+urlopen = _OPENER.open
+
+if not API_KEY and not ALLOW_NO_AUTH:
+    sys.exit("ANTSEED_API_KEY 未设置。对外暴露的网关必须鉴权;确需关闭请设 ALLOW_NO_AUTH=1")
+
+
+def log(*a):
+    print(time.strftime("%Y-%m-%d %H:%M:%S"), *a, flush=True)
+
 
 def is_free(p):
     return p.get("inputUsdPerMillion", 999) == 0 and p.get("outputUsdPerMillion", 999) == 0
 
-class H(http.server.BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
 
+# ---------------- 健康状态 ----------------
+class Health:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.catalog = {}   # model_id -> 上游 /v1/models 里的条目
+        self.state = {}     # model_id -> dict(ok_at, latency, fails, banned_until, last_error)
+        self.last_probe = 0
+
+    def _st(self, m):
+        return self.state.setdefault(m, {"ok_at": 0, "latency": None, "fails": 0,
+                                         "banned_until": 0, "last_error": None})
+
+    def success(self, m, latency=None):
+        with self.lock:
+            s = self._st(m)
+            s["ok_at"] = time.time()
+            if latency is not None:
+                s["latency"] = latency if s["latency"] is None else 0.7 * s["latency"] + 0.3 * latency
+            s["fails"] = 0
+            s["banned_until"] = 0
+            s["last_error"] = None
+
+    def failure(self, m, err):
+        with self.lock:
+            s = self._st(m)
+            s["fails"] += 1
+            s["last_error"] = str(err)[:200]
+            if s["fails"] >= FAIL_THRESHOLD:
+                s["banned_until"] = time.time() + BLACKLIST_SECONDS
+                log(f"[ban] {m} 冷却 {BLACKLIST_SECONDS}s: {s['last_error']}")
+
+    def healthy(self):
+        """按优先级返回健康模型列表"""
+        now = time.time()
+        with self.lock:
+            ok = [m for m, s in self.state.items()
+                  if m in self.catalog and s["banned_until"] < now and now - s["ok_at"] < HEALTHY_TTL]
+            lat = {m: (self.state[m]["latency"] or 999) for m in ok}
+        pref = [m for m in FALLBACK_ORDER if m in ok]
+        rest = sorted((m for m in ok if m not in pref), key=lambda m: lat[m])
+        return pref + rest
+
+    def banned(self, m):
+        with self.lock:
+            return self._st(m)["banned_until"] > time.time()
+
+    def reset_all(self):
+        with self.lock:
+            for s in self.state.values():
+                s["fails"] = 0
+                s["banned_until"] = 0
+                s["last_error"] = None
+
+    def snapshot(self):
+        now = time.time()
+        with self.lock:
+            out = {}
+            for m in self.catalog:
+                s = self._st(m)
+                out[m] = {
+                    "healthy": s["banned_until"] < now and now - s["ok_at"] < HEALTHY_TTL,
+                    "latency_s": round(s["latency"], 2) if s["latency"] else None,
+                    "fails": s["fails"],
+                    "banned_for_s": max(0, int(s["banned_until"] - now)),
+                    "last_ok_ago_s": int(now - s["ok_at"]) if s["ok_at"] else None,
+                    "last_error": s["last_error"],
+                }
+            return out
+
+
+H = Health()
+
+
+def current_identity():
+    try:
+        with open(BUYER_UNIT) as f:
+            for line in f:
+                if "ANTSEED_IDENTITY_HEX=" in line:
+                    return line.split("ANTSEED_IDENTITY_HEX=", 1)[1].strip().strip('"')
+    except Exception:
+        pass
+    return ""
+
+
+def rotate_wait():
+    """同步轮换 buyer 节点身份并等待就绪;身份确实变化时清空付费模型判定与拉黑。"""
+    with _rotate_lock:
+        before = current_identity()
+        try:
+            subprocess.run([ROTATE_SCRIPT], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=240)
+        except Exception:
+            pass
+        deadline = time.time() + 150
+        while time.time() < deadline:
+            try:
+                urlopen(UPSTREAM + "/v1/models", timeout=5)
+                break
+            except Exception:
+                time.sleep(2)
+        after = current_identity()
+        if after and after != before:
+            _credit_models.clear()
+            H.reset_all()
+            log(f"[rotate] identity {before[:8]} -> {after[:8]}")
+            return True
+        return False
+
+
+# ---------------- 上游 ----------------
+def fetch_catalog():
+    with urlopen(UPSTREAM + "/v1/models", timeout=60) as r:
+        data = json.loads(r.read())
+    cat = {}
+    for m in data.get("data", []):
+        if m.get("type", "text") != "text":
+            continue
+        if FREE_ONLY:
+            peers = [p for p in m.get("peers", []) if is_free(p)]
+            if not peers:
+                continue
+            m = dict(m, peers=peers)
+        cat[m["id"]] = m
+    return cat
+
+
+def probe(model):
+    body = json.dumps({"model": model, "max_tokens": 1, "stream": False,
+                       "messages": [{"role": "user", "content": "hi"}]}).encode()
+    req = urllib.request.Request(UPSTREAM + "/v1/chat/completions", data=body, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    t0 = time.time()
+    try:
+        with urlopen(req, timeout=PROBE_TIMEOUT) as r:
+            data = json.loads(r.read() or b"{}")
+        if not data.get("choices"):
+            raise ValueError("no choices in response")
+        _probe_402.discard(model)
+        H.success(model, time.time() - t0)
+        return True
+    except urllib.error.HTTPError as e:
+        H.failure(model, f"HTTP {e.code}: {(e.read() or b'')[:120]!r}")
+        if e.code == 402:
+            _probe_402.add(model)
+    except Exception as e:
+        H.failure(model, e)
+    return False
+
+
+def probe_loop():
+    while True:
+        try:
+            cat = fetch_catalog()
+            with H.lock:
+                H.catalog = cat
+            todo = [m for m in cat if not H.banned(m)]
+            with ThreadPoolExecutor(PROBE_WORKERS) as ex:
+                results = list(ex.map(probe, todo))
+                if AUTO_ROTATE and _probe_402 and sum(results) == 0:
+                    log("[probe] 候选全部 402,轮换节点身份后重探一轮")
+                    rotate_wait()
+                    results = list(ex.map(probe, sorted(_probe_402)))
+            H.last_probe = time.time()
+            log(f"[probe] 候选 {len(cat)},本轮探测 {len(todo)},通过 {sum(results)},"
+                f"当前健康: {', '.join(H.healthy()) or '无'}")
+        except Exception as e:
+            log(f"[probe] 拉取模型列表失败: {e}")
+        time.sleep(PROBE_INTERVAL)
+
+
+def open_upstream(path, body, headers, timeout):
+    """返回 (status, headers, HTTPResponse);连接失败抛异常"""
+    u = urllib.request.urlparse(UPSTREAM)
+    conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=timeout)
+    conn.request("POST", path, body=body, headers=headers)
+    resp = conn.getresponse()
+    return resp, conn
+
+
+# ---------------- HTTP 服务 ----------------
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "antseed-gateway"
+
+    def log_message(self, fmt, *args):
+        pass
+
+    # --- 工具 ---
     def _auth_ok(self):
         if not API_KEY:
             return True
-        return self.headers.get("Authorization", "") == f"Bearer {API_KEY}"
+        got = self.headers.get("Authorization", "")
+        return hmac.compare_digest(got.encode(), f"Bearer {API_KEY}".encode())
 
-    def _send(self, status, body, ctype="application/json"):
+    def _send(self, status, body, ctype="application/json", extra=None):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def _err(self, status, msg):
-        self._send(status, json.dumps({"error": {"message": msg}}).encode())
+    def _json(self, status, obj, extra=None):
+        self._send(status, json.dumps(obj, ensure_ascii=False).encode(), extra=extra)
 
-    def _forward(self):
+    def _err(self, status, msg):
+        self._json(status, {"error": {"message": msg, "type": "gateway_error"}})
+
+    def _body(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        return self.rfile.read(n) if n > 0 else b""
+
+    # --- 路由 ---
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/health":
+            healthy = H.healthy()
+            return self._json(200, {"ok": bool(healthy), "healthy": healthy,
+                                    "last_probe_ago_s": int(time.time() - H.last_probe) if H.last_probe else None})
         if not self._auth_ok():
             return self._err(401, "invalid api key")
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        body = self.rfile.read(length) if length > 0 else None
-        req = urllib.request.Request(UPSTREAM + self.path, data=body, method=self.command,
+        if path == "/v1/models":
+            return self._models()
+        if path == "/v1/health/detail":
+            return self._json(200, H.snapshot())
+        return self._passthrough(b"")
+
+    def do_POST(self):
+        if not self._auth_ok():
+            return self._err(401, "invalid api key")
+        body = self._body()
+        if self.path.split("?")[0] == "/v1/chat/completions":
+            return self._chat(body)
+        return self._passthrough(body)
+
+    def _models(self):
+        healthy = H.healthy()
+        with H.lock:
+            cat = dict(H.catalog)
+        # 启动初期还没探测完时,退回原始候选,避免列表为空
+        ids = healthy if (healthy or H.last_probe) else list(cat)
+        data = []
+        snap = H.snapshot()
+        for m in ids:
+            item = dict(cat.get(m, {"id": m, "object": "model"}))
+            item["x_latency_s"] = snap.get(m, {}).get("latency_s")
+            data.append(item)
+        if healthy:
+            data.insert(0, {"id": "auto", "object": "model", "owned_by": "gateway",
+                            "x_routes_to": healthy[0]})
+        self._json(200, {"object": "list", "data": data})
+
+    def _passthrough(self, body):
+        req = urllib.request.Request(UPSTREAM + self.path, data=body or None, method=self.command,
                                      headers={"Content-Type": self.headers.get("Content-Type", "application/json")})
         try:
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = resp.read()
-                self._send(resp.status, data, resp.headers.get("Content-Type", "application/json"))
+            with urlopen(req, timeout=NONSTREAM_TIMEOUT) as r:
+                self._send(r.status, r.read(), r.headers.get("Content-Type", "application/json"))
         except urllib.error.HTTPError as e:
-            body = e.read() or b"{}"
-            if e.code == 402:
-                self._trigger_rotate()
-            self._send(e.code, body)
+            self._send(e.code, e.read() or b"{}")
         except Exception as e:
             self._err(502, f"upstream error: {e}")
 
-    def do_GET(self):
-        if self.path.split("?")[0] == "/v1/models" and FREE_ONLY:
-            return self._models_free()
-        if self.path == "/health":
-            return self._send(200, b'{"ok":true}')
-        return self._forward()
+    def _candidates(self, requested):
+        healthy = H.healthy()
+        if requested in AUTO_NAMES or not requested:
+            first = healthy[:1]
+        elif AUTO_FALLBACK and (H.banned(requested) or requested in _credit_models) and healthy:
+            first = []          # 指定的模型正在冷却,直接走回退
+        else:
+            first = [requested]
+        if not AUTO_FALLBACK:
+            return first
+        rest = [m for m in healthy if m not in first]
+        return (first + rest)[:MAX_ATTEMPTS]
 
-    def do_HEAD(self):
-        return self._forward()
-
-    def do_POST(self):
-        return self._forward()
-
-    def _models_free(self):
-        if not self._auth_ok():
-            return self._err(401, "invalid api key")
+    def _chat(self, raw):
+        self._headers_sent = False
         try:
-            with urllib.request.urlopen(UPSTREAM + "/v1/models", timeout=120) as resp:
-                data = json.loads(resp.read())
-        except Exception as e:
-            return self._err(502, f"upstream error: {e}")
-        out = []
-        for m in data.get("data", []):
-            # 只保留文本模型:图片等非 chat 模型走 chat/completions 会被上游 400
-            if m.get("type") != "text":
-                continue
-            peers = [p for p in m.get("peers", []) if is_free(p)]
-            if peers:
-                m["peers"] = peers
-                out.append(m)
-        data["data"] = out
-        self._send(200, json.dumps(data, ensure_ascii=False).encode())
+            payload = json.loads(raw or b"{}")
+        except json.JSONDecodeError:
+            return self._err(400, "invalid JSON body")
+        requested = payload.get("model", "")
+        stream = bool(payload.get("stream"))
+        cands = self._candidates(requested)
+        if not cands:
+            return self._err(503, "no healthy model available right now; check /health")
 
-    def log_message(self, fmt, *args):
+        rotated = False
+        last = (502, b'{"error":{"message":"all attempts failed"}}')
+        i = 0
+        while i < len(cands):
+            model = cands[i]
+            payload["model"] = model
+            body = json.dumps(payload).encode()
+            hdrs = {"Content-Type": "application/json",
+                    "Accept": "text/event-stream" if stream else "application/json"}
+            t0 = time.time()
+            conn = None
+            try:
+                resp, conn = open_upstream(self.path, body, hdrs,
+                                           STREAM_IDLE_TIMEOUT if stream else NONSTREAM_TIMEOUT)
+                if (resp.status == 402 and AUTO_ROTATE and not rotated
+                        and model not in _credit_models and os.path.exists(ROTATE_SCRIPT)):
+                    resp.read()
+                    rotated = True
+                    log(f"[chat] {model} -> 402,疑似节点身份额度耗尽,轮换身份后重试同一模型")
+                    rotate_wait()
+                    continue  # 同一模型再试一次
+                if resp.status >= 400:
+                    err_body = resp.read() or b"{}"
+                    last = (resp.status, err_body)
+                    if resp.status == 402 and rotated:
+                        _credit_models.add(model)   # 换身份仍 402:真·付费模型
+                    if resp.status in RETRYABLE:
+                        H.failure(model, f"HTTP {resp.status}")
+                        log(f"[chat] {model} -> {resp.status},尝试下一个 ({i + 1}/{len(cands)})")
+                        i += 1
+                        continue
+                    return self._send(resp.status, err_body)  # 400 之类的请求错误,不重试
+
+                extra = {"X-Antseed-Model": model, "X-Antseed-Attempt": str(i + 1)}
+                if stream:
+                    self._relay_stream(resp, extra)
+                else:
+                    data = resp.read()
+                    self._send(resp.status, data, resp.getheader("Content-Type", "application/json"), extra)
+                H.success(model, time.time() - t0 if not stream else None)
+                return
+            except (socket.timeout, TimeoutError, ConnectionError, http.client.HTTPException, OSError) as e:
+                if getattr(self, "_headers_sent", False):
+                    # 已开始向客户端输出,不能再回退
+                    H.failure(model, f"mid-stream: {e}")
+                    return
+                H.failure(model, e)
+                last = (502, json.dumps({"error": {"message": f"upstream error: {e}"}}).encode())
+                log(f"[chat] {model} 连接失败: {e},尝试下一个 ({i + 1}/{len(cands)})")
+                i += 1
+            finally:
+                if conn:
+                    conn.close()
+        self._send(last[0], last[1])
+
+    def _relay_stream(self, resp, extra):
+        self.send_response(resp.status)
+        self.send_header("Content-Type", resp.getheader("Content-Type", "text/event-stream"))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Transfer-Encoding", "chunked")
+        for k, v in extra.items():
+            self.send_header(k, v)
+        self.end_headers()
+        self._headers_sent = True
         try:
-            os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            pass
-        pass
+            while True:
+                chunk = resp.read1(65536)
+                if not chunk:
+                    break
+                self.wfile.write(b"%X\r\n%s\r\n" % (len(chunk), chunk))
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # 客户端断开
 
-    def _trigger_rotate(self):
-        if not os.path.exists(ROTATE_SCRIPT):
-            return
-        if os.path.exists("/tmp/antseed-rotate.lock"):
-            return
-        try:
-            subprocess.Popen([ROTATE_SCRIPT], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
 
-class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    address_family = socket.AF_INET6
-    def server_bind(self):
-        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-        super().server_bind()
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def __init__(self, addr, handler):
+        self.address_family = socket.AF_INET6 if ":" in addr[0] else socket.AF_INET
+        super().__init__(addr, handler)
+
+    def server_bind(self):
+        if self.address_family == socket.AF_INET6:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
 if __name__ == "__main__":
-    S(LISTEN, H).serve_forever()
+    threading.Thread(target=probe_loop, daemon=True).start()
+    log(f"gateway listening on [{BIND}]:{PORT} -> {UPSTREAM} (FREE_ONLY={FREE_ONLY}, fallback={AUTO_FALLBACK})")
+    Server((BIND, PORT), Handler).serve_forever()
 PYEOF
 chmod +x /usr/local/bin/antseed-free-filter.py
 
@@ -393,7 +747,13 @@ User=root
 Environment="ANTSEED_API_KEY=${API_KEY}"
 Environment="FREE_ONLY=${FREE_ONLY}"
 Environment="GATEWAY_PORT=8377"
-ExecStart=/usr/bin/python3 /usr/local/bin/antseed-free-filter.py
+Environment="AUTO_ROTATE=1"
+Environment="PROBE_INTERVAL=300"
+Environment="FAIL_THRESHOLD=2"
+Environment="BLACKLIST_SECONDS=900"
+Environment="AUTO_FALLBACK=1"
+Environment="MAX_ATTEMPTS=3"
+ExecStart=/usr/bin/env python3 /usr/local/bin/antseed-free-filter.py
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
