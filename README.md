@@ -112,7 +112,7 @@ curl -fsSL https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/inst
 
 ```bash
 # 立即轮换身份（生成新身份 → 重启 buyer → 等待就绪,约 15-20 秒）
-bash /usr/local/bin/antseed-rotate-identity.sh
+bash -x /usr/local/bin/antseed-rotate-identity.sh
 
 # 查看轮换记录（确认是否刷新）
 tail -5 /var/log/antseed-rotate.log
