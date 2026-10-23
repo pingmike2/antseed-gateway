@@ -1017,12 +1017,17 @@ wait_upstream() {
     local i nr nr0
     [ "$DRY_RUN" = "1" ] && return 0
     nr0="$(systemctl show -p NRestarts --value antseed-buyer 2>/dev/null || echo 0)"
-    for i in $(seq 1 45); do
+    # 首次启动时 buyer 要现场 npm 装 @antseed/router-local,慢机器 3-5 分钟是常态,
+    # 给到 5 分钟;期间每 60s 报一次进度,免得看着像卡死。
+    for i in $(seq 1 150); do
         if curl -fsS -m 3 "http://127.0.0.1:$BUYER_PORT/v1/models" >/dev/null 2>&1; then
             log "buyer 就绪 (port $BUYER_PORT, 约 $((i * 2 - 2))s)"
             return 0
         fi
-        # 崩了在重启就别干等满 90s —— 每次重启都说明这一轮已经失败了
+        if [ $((i % 30)) -eq 0 ]; then
+            info "仍在等 buyer(已 $((i * 2))s):首次启动要装 P2P 插件,慢机器可达数分钟"
+        fi
+        # 崩了在重启就别干等 —— 每次重启都说明这一轮已经失败了
         if [ $((i % 5)) -eq 0 ]; then
             nr="$(systemctl show -p NRestarts --value antseed-buyer 2>/dev/null || echo 0)"
             case "$nr" in ''|*[!0-9]*) nr=0 ;; esac
@@ -1424,7 +1429,7 @@ run systemctl daemon-reload
 run_q systemctl enable antseed-buyer.service || true
 run systemctl restart antseed-buyer.service
 if ! wait_upstream; then
-    warn "buyer 未在 ${BUYER_PORT} 就绪,继续装网关(网关会一直重试上游)"
+    warn "buyer 5 分钟内未在 ${BUYER_PORT} 就绪,继续装网关(网关会一直重试上游)"
     _why="$(journalctl -u antseed-buyer -n 60 --no-pager 2>/dev/null \
             | grep -m1 -E 'Cause: |Cannot install|npm was not found|Error: ' || true)"
     if [ -n "$_why" ]; then
@@ -1442,6 +1447,9 @@ fi
 
 run_q systemctl enable antseed-gateway.service || true
 run systemctl restart antseed-gateway.service
+# 网关对上游目录有 60s 缓存;装完立刻打一次,省得用户头一分钟看到空列表
+[ "$DRY_RUN" = "1" ] || curl -fsS -m 10 -H "Authorization: Bearer $API_KEY" \
+    "http://127.0.0.1:$GW_PORT/v1/models" >/dev/null 2>&1 || true
 
 # ---------------- 自检 ----------------
 if [ "$DRY_RUN" != "1" ]; then
