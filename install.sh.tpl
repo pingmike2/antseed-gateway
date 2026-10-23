@@ -256,14 +256,26 @@ toolchain_probe() {
             NODE_BIN=""
         fi
     fi
+    # 用内置 Node 时,prefix 就是它自己的目录。别只信 `npm prefix -g`:
+    # 某些 npm 版本在这个布局下直接返回空串,会把 prefix 误判成 /usr/local,
+    # 于是 unit 里 ExecStart 指到一个不存在的 /usr/local/bin/antseed。
+    case "$NODE_BIN" in
+        "$NODE_DIR"/bin/node) NODE_PREFIX="$NODE_DIR" ;;
+    esac
     if [ -z "$NODE_PREFIX" ] && [ -n "$NPM_BIN" ]; then
-        NODE_PREFIX="$("$NPM_BIN" prefix -g 2>/dev/null || echo /usr/local)"
+        NODE_PREFIX="$("$NPM_BIN" prefix -g 2>/dev/null || true)"
     fi
+    [ -n "$NODE_PREFIX" ] || NODE_PREFIX=/usr/local
     if [ -z "$ANTSEED_BIN" ] || [ ! -e "$ANTSEED_BIN" ]; then
         ANTSEED_BIN="$(command -v antseed 2>/dev/null || true)"
     fi
-    [ -n "$ANTSEED_BIN" ] || ANTSEED_BIN="${NODE_PREFIX:+$NODE_PREFIX/bin/antseed}"
-    ANTSEED_BIN="${ANTSEED_BIN:-/usr/bin/antseed}"
+    if [ -z "$ANTSEED_BIN" ] || [ ! -e "$ANTSEED_BIN" ]; then
+        [ -e "$NODE_PREFIX/bin/antseed" ] && ANTSEED_BIN="$NODE_PREFIX/bin/antseed"
+    fi
+    if [ -z "$ANTSEED_BIN" ] || [ ! -e "$ANTSEED_BIN" ]; then
+        [ -e "$NODE_DIR/bin/antseed" ] && ANTSEED_BIN="$NODE_DIR/bin/antseed"
+    fi
+    ANTSEED_BIN="${ANTSEED_BIN:-$NODE_PREFIX/bin/antseed}"
 }
 
 cli_current() {   # 本机已装的 @antseed/cli 版本;读不到就返回空
@@ -933,7 +945,7 @@ User=root
 WorkingDirectory=/root
 EnvironmentFile=$BUYER_ENV
 # buyer 运行时要靠 npm 现装插件(@antseed/router-local 等)。systemd 的默认 PATH
-# 不含内置 Node 目录,不给就会 `npm was not found` 然后无限重启、8378 永远起不来。
+# 不含内置 Node 目录,不给就会 npm was not found 然后无限重启、8378 永远起不来。
 Environment=PATH=$NODE_PREFIX/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=$NODE_BIN $ANTSEED_BIN buyer start --port $BUYER_PORT
 Restart=always
