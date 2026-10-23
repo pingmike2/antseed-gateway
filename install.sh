@@ -728,13 +728,27 @@ log "Python: $("$PYBIN" -V 2>&1) ($PYBIN)"
 # `bash <(curl ...)` 会把 /dev/fd/63 当作 stdin,此时 [ -t 0 ] 是假,菜单就永远
 # 不出现,用户敲的选择会被当成安装流程的输入吃掉。真终端一般挂在 /dev/tty。
 # 管道喂数据的脚本场景(echo 3 | bash install.sh)仍按"直接安装"处理。
+# 判定标准只有一条:**当前进程有没有可用的终端**。不要看 fd 1 ——
+# 输出被重定向、被面板/日志中转、被 tee 走一遍时 [ -t 1 ] 就是假,
+# 菜单会静默消失、直接开装,用户还以为安装器没有菜单。
 if [ "$#" -eq 0 ] && [ "$ACTION" = "install" ] && [ "${NO_MENU:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
-    if [ -t 1 ] && { [ -t 0 ] || { [ -r /dev/tty ] && [ -w /dev/tty ]; }; }; then
-        # 让菜单从 /dev/tty 读,避免被 <(curl ...) 的 fd 顶掉标准输入
-        if [ -r /dev/tty ] && [ -w /dev/tty ]; then
-            exec 3</dev/tty 4>/dev/tty 2>/dev/null && MENU_TTY=1
+    MENU_OK=0
+    # 首选 /dev/tty:bash <(curl ...) 把 fd 0 换成了管道,终端仍挂在 /dev/tty
+    if { : </dev/tty; } 2>/dev/null && { : >/dev/tty; } 2>/dev/null; then
+        if exec 3</dev/tty 4>/dev/tty 2>/dev/null; then
+            MENU_TTY=1
+            MENU_OK=1
         fi
+    fi
+    # 退路:stdin 本身就是终端(bash install.sh / ./install.sh)
+    if [ "$MENU_OK" = "0" ] && [ -t 0 ]; then
+        MENU_TTY=0
+        MENU_OK=1
+    fi
+    if [ "$MENU_OK" = "1" ]; then
         ACTION=menu
+    else
+        warn "非交互环境,直接安装(想要菜单: bash install.sh menu)"
     fi
 fi
 case "$ACTION" in
