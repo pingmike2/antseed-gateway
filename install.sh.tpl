@@ -512,6 +512,20 @@ menu_state() {
     local st; st="$(systemctl is-active antseed-gateway.service 2>/dev/null || true)"
     printf '%s' "${st:-未安装}"
 }
+# 菜单读输入统一走真实终端:bash <(curl ...) 会把 stdin 顶成 /dev/fd/63,
+# 直接 read 会读到脚本自己的字节流(或者 EOF),菜单当场退出。
+menu_ask() {   # menu_ask <prompt> [default]  -> 打印用户输入
+    local _p="$1" _d="${2-}" _v=""
+    printf '%s' "$_p" >&2
+    if [ "${MENU_TTY:-0}" = "1" ]; then
+        IFS= read -r _v <&3 || _v="$_d"
+    else
+        IFS= read -r _v || _v="$_d"
+    fi
+    [ -n "$_v" ] || _v="$_d"
+    printf '%s' "$_v"
+}
+
 do_menu() {
     local c a key gwv
     while :; do
@@ -533,11 +547,11 @@ do_menu() {
         echo "  7) 修改配置               (API key、端口、FREE_ONLY…)"
         echo "  0) 退出"
         echo "=================================================="
-        read -r -p "  选择 [0-7]: " c || return 0
+        c="$(menu_ask "  选择 [0-7]: ")"
         case "$c" in
             1)
                 _ms="$(menu_self)" || die "拿不到可重执行的脚本副本(离线?)。请在本地已下载的 install.sh 上跑菜单。"
-                read -r -p "  API Key(留空=沿用已有/自动生成): " key || key=""
+                key="$(menu_ask "  API Key(留空=沿用已有/自动生成): ")"
                 echo ""
                 if [ -n "$key" ]; then
                     exec env NO_MENU=1 INSTALL_URL="$SELF_URL" bash "$_ms" --key="$key"
@@ -552,7 +566,7 @@ do_menu() {
                 ;;
             3)
                 _ms="$(menu_self)" || die "拿不到可重执行的脚本副本(离线?)。请用: bash install.sh uninstall [--purge]"
-                read -r -p "  连 /etc/antseed 配置与节点身份一起删? [y/N] " a || a=""
+                a="$(menu_ask "  连 /etc/antseed 配置与节点身份一起删? [y/N] ")"
                 case "$a" in
                     [yY]*) NO_MENU=1 bash "$_ms" uninstall --purge || warn "卸载返回非零" ;;
                     *)     NO_MENU=1 bash "$_ms" uninstall || warn "卸载返回非零" ;;
@@ -565,7 +579,7 @@ do_menu() {
                 ;;
             5) do_status ;;
             6)
-                read -r -p "  1=最近 60 行  2=实时跟随  [1]: " a || a=1
+                a="$(menu_ask "  1=最近 60 行  2=实时跟随  [1]: " 1)"
                 case "$a" in
                     2) LOG_FOLLOW=1 do_logs ;;
                     *) do_logs ;;
@@ -575,8 +589,8 @@ do_menu() {
             0|q|Q|"") log "退出"; return 0 ;;
             *) warn "无效选择: $c" ;;
         esac
-        printf '\n  按回车返回菜单...'
-        read -r _ || return 0
+        printf '\n  按回车返回菜单...' >&2
+        if [ "${MENU_TTY:-0}" = "1" ]; then IFS= read -r _ <&3 || return 0; else IFS= read -r _ || return 0; fi
     done
 }
 
@@ -694,11 +708,18 @@ fi
 log "Python: $("$PYBIN" -V 2>&1) ($PYBIN)"
 
 # ---------------- 运行期管理命令:先分流 ----------------
-# 无参数 + 交互终端 = 进菜单(方便运维);管道/重定向等非交互场景仍按"直接安装"处理,
-# 这样 curl | bash 的老用法不变。要强制跳过菜单:NO_MENU=1 bash install.sh
-if [ "$#" -eq 0 ] && [ "$ACTION" = "install" ] && [ -t 0 ] && [ -t 1 ] \
-   && [ "${NO_MENU:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
-    ACTION=menu
+# 无参数时进菜单(方便运维)。判断"能不能交互"要看**真实终端**,不能看 fd 0:
+# `bash <(curl ...)` 会把 /dev/fd/63 当作 stdin,此时 [ -t 0 ] 是假,菜单就永远
+# 不出现,用户敲的选择会被当成安装流程的输入吃掉。真终端一般挂在 /dev/tty。
+# 管道喂数据的脚本场景(echo 3 | bash install.sh)仍按"直接安装"处理。
+if [ "$#" -eq 0 ] && [ "$ACTION" = "install" ] && [ "${NO_MENU:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
+    if [ -t 1 ] && { [ -t 0 ] || { [ -r /dev/tty ] && [ -w /dev/tty ]; }; }; then
+        # 让菜单从 /dev/tty 读,避免被 <(curl ...) 的 fd 顶掉标准输入
+        if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+            exec 3</dev/tty 4>/dev/tty 2>/dev/null && MENU_TTY=1
+        fi
+        ACTION=menu
+    fi
 fi
 case "$ACTION" in
     menu)
