@@ -182,6 +182,15 @@ _self_src="${BASH_SOURCE[0]:-$0}"
 case "$_self_src" in
     /dev/fd/*|/proc/*/fd/*|/dev/stdin|-) SELF_IS_PIPE=1 ;;
 esac
+# 管道模式下记住 bash 用来读脚本的 fd,退出前排空它 —— 否则 `bash <(curl ...)`
+# 提前退出(菜单选 0)时 curl 还在写管道,会吐一行
+# `curl: (23) Failure writing output to destination`,看着像故障,其实只是 EPIPE。
+SELF_PIPE_FD=""
+if [ "$SELF_IS_PIPE" = "1" ]; then
+    case "$_self_src" in
+        /dev/fd/*|/proc/*/fd/*) SELF_PIPE_FD="${_self_src##*/}" ;;
+    esac
+fi
 if [ "$SELF_IS_PIPE" = "0" ] && [ -n "$_self_src" ] && [ -r "$_self_src" ] && [ ! -c "$_self_src" ]; then
     _sp_dir="$(cd "$(dirname "$_self_src")" 2>/dev/null && pwd)" || _sp_dir=""
     [ -n "$_sp_dir" ] && SELF_PATH="$_sp_dir/$(basename "$_self_src")"
@@ -682,6 +691,10 @@ esac
 
 TMPDIR_INSTALL="$(mktemp -d)"
 cleanup() {
+    # 先把脚本管道的剩余内容读空,curl/wget 就不会因 EPIPE 报错(见 SELF_PIPE_FD)
+    if [ -n "${SELF_PIPE_FD:-}" ] && [ -e "/dev/fd/$SELF_PIPE_FD" ]; then
+        ( timeout 3 cat <"/dev/fd/$SELF_PIPE_FD" >/dev/null 2>&1 & ) 2>/dev/null
+    fi
     rm -rf "$TMPDIR_INSTALL"
     # 菜单从 URL 现取的可执行副本(在 /tmp,不在 TMPDIR_INSTALL 里)
     [ -n "${SELF_CACHE:-}" ] && rm -f "$SELF_CACHE" 2>/dev/null
