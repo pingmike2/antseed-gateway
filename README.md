@@ -211,3 +211,30 @@ bash install.sh --dry-run        # 看安装流程
 | 流式像卡住 | `STREAM_IDLE_TIMEOUT` 太小,或客户端/Nginx 缓冲:`proxy_buffering off;` |
 | buyer 反复重启 | 看 `journalctl -u antseed-buyer`;OOM 就降 `MAX_CONCURRENCY`,或换大内存机型 |
 | 外网连不上 | `GATEWAY_BIND` 是不是还是 `127.0.0.1`;云厂商安全组是否放行端口 |
+
+## 致谢 (Acknowledgements)
+
+本项目站在这些公开项目的肩膀上：
+
+| 项目 | 用途 |
+|---|---|
+| [Antseed](https://antseed.com) | 上游本身——AI 推理的开放市场，本项目的模型能力全部来自它 |
+| [@antseed/cli](https://www.npmjs.com/package/@antseed/cli) | 官方 P2P 客户端（`antseed buyer`），网关把请求转发到它的本地 8378 端口 |
+| [Node.js](https://nodejs.org/) | 官方 CLI 的运行时，`install.sh` 装一份内置版，不动系统 Node |
+
+网关本体零第三方依赖，只用 Python 标准库。
+
+## 免责声明 (Disclaimer)
+
+本项目仅供学习、研究与个人技术实验使用，请勿用于任何可能违反第三方服务条款（ToS）或适用的法律法规的场景。
+
+- 本项目**非官方**，与 Antseed 及其运营方无任何关联、无背书（not affiliated with or endorsed by）。仓库里不包含、也不分发上游任何代码——`@antseed/cli` 是官方独立发布的 npm 包（Proprietary），由安装脚本从 npm 现取。
+- 免费模型与免费额度的可用性完全取决于上游策略，随时可能变化或失效（下架、加闸、限流、改协议、风控封号均有可能），本项目不对其持续性、稳定性作任何担保。**免费通道随时会断，这是免费层的本质，不是 bug。**
+- 需要稳定通道，请直接使用[官方 CLI](https://www.npmjs.com/package/@antseed/cli) 与官方账户额度。
+- 网关本身不收集、不上报任何用户数据，也不把请求内容落盘；运行日志只落在本机 systemd journal。你的 API key 与节点身份只存在于本机 `/etc/antseed/`。
+- 通过本项目访问上游所产生的账号封禁、额度清零、费用、法律或经济风险，均由使用者自行承担；使用本项目即视为你理解并接受这一点。
+- 软件本体按 MIT 协议 "AS IS" 提供，不带任何担保（见 [LICENSE](./LICENSE)）。
+
+## License
+
+[MIT](./LICENSE) © 2026 [pingmike2](https://github.com/pingmike2)
