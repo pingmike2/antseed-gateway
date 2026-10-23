@@ -33,7 +33,7 @@
 set -Eeuo pipefail
 umask 022
 
-VERSION="2.0.9"
+VERSION="2.0.10"
 PROG="antseed-gateway"
 
 GATEWAY_PY="/usr/local/bin/antseed-gateway.py"
@@ -1100,6 +1100,7 @@ CLIENT_TIMEOUT=300
 # ---- 限额 ----
 MAX_CONCURRENCY=64
 MAX_BODY_MB=64
+DRAIN_BODY_MB=8            # 回绝请求前最多读掉多少残留 body(读掉再关连接,客户端才不会看到连接被重置)
 MODELS_TTL=60
 
 # ---- 402 换身份(默认关闭,开启前读 README 的风险说明) ----

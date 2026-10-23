@@ -1,3 +1,52 @@
+# v2.0.10:413/400 回绝时没关连接,客户端看到的是"连接被重置"而不是错误文案
+
+## 现象
+
+超限请求体(默认 `MAX_BODY_MB=64`)本该拿到 `413`,实际却是:
+
+```
+curl: (56) Send failure: Connection was aborted
+# 或 Python http.client: ConnectionAbortedError(10053) / RemoteDisconnected
+```
+
+`Content-Length` 写坏时同理:400 的文案偶尔能收到,更多时候是断连;同一个 keep-alive 连接
+上还会接着出现一个莫名其妙的 `400`,因为残留的 body 被当成下一个请求行解析。
+
+## 根因
+
+`do_POST()` 里三条"请求体还没读完就回绝"的路径(413 超限、400 坏长度、以及 404/401)只
+`_err()` 了一下,**没有 `Connection: close`,也没有读掉残留 body**。`BaseHTTPRequestHandler`
+在 HTTP/1.1 下默认 keep-alive,于是:
+
+1. 我们回 413 后连接保持打开,客户端还在发 2MB;
+2. 网关接着把这段 body 当请求行读,读到超长行 / 非法字节;
+3. 客户端先撞上 `RST`,才轮到我们的错误文案 —— 所以它看见的永远是断连。
+
+v2.0.0 的验证记录里写过"2MB body → 413",但那只是看了状态码,没看连接语义,所以没暴露。
+
+## 修法:回绝前先把残留 body 读掉(有上限),再显式关连接
+
+```python
+def _reject_body(self, status, msg):
+    self._discard_body()                 # 最多 DRAIN_BODY_MB(默认 8MB),带 1s 超时
+    self.close_connection = True
+    return self._err(status, msg, extra={"Connection": "close"})
+```
+
+- 新增 `DRAIN_BODY_MB`(默认 8):读掉残留是为了让对面能收完响应;设上限是为了不被超大 body 拖住
+- 413 / 400(坏 `Content-Length`)/ 上部 `/v1` 之外的 404 / 未通过鉴权的 401 四条路径统一走它
+- `gateway.env` 里同步写了 `DRAIN_BODY_MB=8` 与注释
+
+## 验证
+
+[`tests/test_gateway.py`](tests/test_gateway.py)(59 项,含假上游 + 真网关进程):修前 3 项失败,修后 0 失败。
+
+| 用例 | 修前 | 修后 |
+| --- | --- | --- |
+| 2MB body(上限 1MB) | `ConnectionAbortedError(10053)` | `413` |
+| 413 响应头 | 无 | `Connection: close` |
+| `Content-Length: abc` | `400`,无 `Connection` 头 | `400` + `Connection: close` |
+
 # v2.0.9:客户端给的 `openai/gpt-6-luna` 不再被当成"另一个模型"
 
 ## 现象
@@ -32,7 +81,7 @@ if ":" in name:            # openai:gpt-6-luna 老写法
 
 ## 验证
 
-`/tmp/gwtest/dep_test.py` 新增 5 条(19 passed, 0 failed):
+[`tests/test_gateway.py`](tests/test_gateway.py) 新增 5 条(19 passed, 0 failed):
 
 | 用例 | 期望 |
 | --- | --- |
@@ -96,7 +145,7 @@ HTTP 400
 ## 验证:把回包喂给客户端判定器
 
 复刻 `providerError()` + `isQuotaExceededError()` + `failureMessage()` 的脚本
-(`/tmp/gwtest/dsh_classify.mjs`)对同一份 body 判定:
+([`tests/dsh_classify.mjs`](tests/dsh_classify.mjs))对同一份 body 判定:
 
 ```
 旧回包(402 + insufficient_quota):  {"code":"QUOTA","shown":"当前请求的额度已用尽"}
@@ -401,7 +450,7 @@ bash upgrade.sh
 
 # v2.0.0 改动说明
 
-对照 v1 的 REVIEW.md(31 条,未随仓库提供)逐条说明落地情况。v1 是 [`v1/install.sh`](v1/install.sh)(815 行单文件),v2 拆成:
+对照 v1 的 REVIEW.md(31 条,未随仓库提供)逐条说明落地情况。v1 是 [`v1/install.sh`](v1/install.sh)(505 行单文件),v2 拆成:
 
 | 文件 | 作用 |
 | --- | --- |

@@ -33,7 +33,7 @@
 set -Eeuo pipefail
 umask 022
 
-VERSION="2.0.9"
+VERSION="2.0.10"
 PROG="antseed-gateway"
 
 GATEWAY_PY="/usr/local/bin/antseed-gateway.py"
@@ -724,7 +724,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "2.0.9"
+VERSION = "2.0.10"
 
 if sys.version_info < (3, 7):
     sys.exit("antseed-gateway 需要 Python 3.7+，当前 %s" % sys.version.split()[0])
@@ -786,6 +786,9 @@ NONSTREAM_TIMEOUT = _env_int("NONSTREAM_TIMEOUT", 300)
 MODELS_TTL = _env_int("MODELS_TTL", 60)
 
 MAX_BODY = _env_int("MAX_BODY_MB", 64) * 1024 * 1024
+# 回绝请求(413/400/401/404)前最多把多少"客户端还在发的 body"读掉,再关连接。
+# 读掉是为了让对面能正常收到错误响应而不是 ECONNRESET;设上限是为了不被超大 body 拖住。
+DRAIN_BODY = max(0, _env_int("DRAIN_BODY_MB", 8)) * 1024 * 1024
 MAX_CONCURRENCY = max(1, _env_int("MAX_CONCURRENCY", 64))
 CLIENT_TIMEOUT = _env_int("CLIENT_TIMEOUT", 300)
 ACCESS_LOG = _env_bool("ACCESS_LOG", True)
@@ -1302,18 +1305,57 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._err(404, "not found: " + path)
         return self._proxy(b"")
 
+    def _discard_body(self, limit=DRAIN_BODY):
+        """把客户端还在发的请求体吃掉(最多 limit 字节),让响应能真正送到对面。
+
+        400/413 都是"请求体没读完就回绝":如果直接把 socket 关掉,客户端往往还没把 body
+        发完,它看到的就不是我们的错误文案,而是 ECONNRESET / 连接被中止。
+        """
+        raw = self.headers.get("Content-Length")
+        try:
+            left = int(raw or 0)
+        except (TypeError, ValueError):
+            return
+        if left <= 0:
+            return
+        cap = min(left, limit)
+        try:
+            self.connection.settimeout(1.0)
+            while cap > 0:
+                buf = self.rfile.read(min(cap, 65536))
+                if not buf:
+                    break
+                cap -= len(buf)
+        except (OSError, ValueError):
+            pass
+
+    def _reject_body(self, status, msg):
+        """请求体没读完就回绝:必须显式关连接,并尽量先把残留 body 读掉。
+
+        否则未读的字节会被同一个 keep-alive 连接当成下一个请求行,客户端随后收到的
+        是 400 或直接断连 —— 而不是我们写好的那句错误。
+        """
+        self._discard_body()
+        self.close_connection = True
+        return self._err(status, msg, extra={"Connection": "close"})
+
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
         if not path.startswith("/v1/"):
-            return self._err(404, "not found: " + path)
+            self._discard_body()
+            self.close_connection = True
+            return self._err(404, "not found: " + path, extra={"Connection": "close"})
         if not self._auth_ok():
-            return self._err(401, "invalid api key", "authentication_error")
+            self._discard_body()
+            self.close_connection = True
+            return self._err(401, "invalid api key", "authentication_error",
+                             extra={"Connection": "close"})
         try:
             body = self._read_body()
         except OverflowError:
-            return self._err(413, "request body larger than %dMB" % (MAX_BODY // 1024 // 1024))
+            return self._reject_body(413, "request body larger than %dMB" % (MAX_BODY // 1024 // 1024))
         except ValueError as e:
-            return self._err(400, str(e))
+            return self._reject_body(400, str(e))
         if path in MODEL_PATHS or path.startswith("/v1/messages"):
             return self._model_request(body, label=MODEL_PATH_LABEL(path))
         return self._proxy(body)
@@ -2136,6 +2178,7 @@ CLIENT_TIMEOUT=300
 # ---- 限额 ----
 MAX_CONCURRENCY=64
 MAX_BODY_MB=64
+DRAIN_BODY_MB=8            # 回绝请求前最多读掉多少残留 body(读掉再关连接,客户端才不会看到连接被重置)
 MODELS_TTL=60
 
 # ---- 402 换身份(默认关闭,开启前读 README 的风险说明) ----
