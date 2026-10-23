@@ -18,6 +18,13 @@
 只依赖 Python 3.7+ 标准库。
 """
 
+# ================= 安装脚本本体结束 =================
+# 下面这段 Python 是网关实现:由 tools/build-install.sh 从 gateway.py 自动嵌入。
+# 它位于 heredoc 之前,一旦被 bash 当命令执行就说明
+# 文件结构已损坏 —— 第 1 行会以 "python3: line 1" 之类的报错立刻暴露,而不是
+# 接着往下跑出一屏 "log: command not found"。
+PY_VERSION = "antseed-gateway 2.0.10"
+PY_BYTES = 0  # 构建时由 tools/build-install.sh 回填,用于运行期自检截断
 import errno
 import hmac
 import http.client

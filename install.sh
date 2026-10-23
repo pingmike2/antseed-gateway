@@ -690,8 +690,11 @@ if [ "$ACTION" = "uninstall" ]; then
 fi
 
 # ---------------- 写程序 / unit(install 与 upgrade 共用) ----------------
+# ================= 安装脚本本体结束 =================
+# 以上是安装器本体。紧跟其后,只在下面 write_gateway_py() 的 heredoc 内,会嵌入
+# 网关实现(gateway.py)。出现在 heredoc 之外就说明 build 的结果坏了。
 write_gateway_py() {
-    write_file "$GATEWAY_PY" 0755 <<'ANTSEED_GATEWAY_PY_EOF'
+    [ "$DRY_RUN" = "1" ] || write_file "$GATEWAY_PY" 0755 <<'ANTSEED_GATEWAY_PY_EOF'
 #!/usr/bin/env python3
 """Antseed Gateway —— 对外 OpenAI / Anthropic 兼容网关 (v2)
 
@@ -712,6 +715,13 @@ write_gateway_py() {
 只依赖 Python 3.7+ 标准库。
 """
 
+# ================= 安装脚本本体结束 =================
+# 下面这段 Python 是网关实现:由 tools/build-install.sh 从 gateway.py 自动嵌入。
+# 它位于 heredoc 之前,一旦被 bash 当命令执行就说明
+# 文件结构已损坏 —— 第 1 行会以 "python3: line 1" 之类的报错立刻暴露,而不是
+# 接着往下跑出一屏 "log: command not found"。
+PY_VERSION = "antseed-gateway 2.0.10"
+PY_BYTES = 45383  # 构建时回填,运行期截断用
 import errno
 import hmac
 import http.client

@@ -690,9 +690,12 @@ if [ "$ACTION" = "uninstall" ]; then
 fi
 
 # ---------------- 写程序 / unit(install 与 upgrade 共用) ----------------
+# ================= 安装脚本本体结束 =================
+# 以上是安装器本体。紧跟其后,只在下面 write_gateway_py() 的 heredoc 内,会嵌入
+# 网关实现(gateway.py)。出现在 heredoc 之外就说明 build 的结果坏了。
 write_gateway_py() {
-    write_file "$GATEWAY_PY" 0755 <<'ANTSEED_GATEWAY_PY_EOF'
-@@GATEWAY_PY@@
+    [ "$DRY_RUN" = "1" ] || write_file "$GATEWAY_PY" 0755 <<'ANTSEED_GATEWAY_PY_EOF'
+@GATEWAY_PY_MARK@
 ANTSEED_GATEWAY_PY_EOF
     if [ "$DRY_RUN" != "1" ]; then
         "$PYBIN" -c 'import pathlib,sys; compile(pathlib.Path(sys.argv[1]).read_text(), "gateway.py", "exec")' \
