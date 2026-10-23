@@ -2005,6 +2005,33 @@ exit 0
 ANTSEED_ROTATE_EOF
 }
 
+write_buyer_unit() {
+write_file "$BUYER_UNIT" 0644 <<EOF
+[Unit]
+Description=Antseed buyer (P2P inference client)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+EnvironmentFile=$BUYER_ENV
+# buyer 运行时要靠 npm 现装插件(@antseed/router-local 等)。systemd 的默认 PATH
+# 不含内置 Node 目录,不给就会 `npm was not found` 然后无限重启、8378 永远起不来。
+Environment=PATH=$NODE_PREFIX/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$NODE_BIN $ANTSEED_BIN buyer start --port $BUYER_PORT
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
 write_gateway_unit() {
     write_file "$GW_UNIT" 0644 <<EOF
 [Unit]
@@ -2078,12 +2105,26 @@ do_upgrade() {
         [ "$DRY_RUN" = "1" ] && warn "干跑:$GW_ENV 不存在,真实运行会中止"
         [ "$DRY_RUN" = "1" ] || die "找不到 $GW_ENV,请先完整安装: bash $0"
     fi
+    # 升级不动 Node/CLI,但写 unit 需要这三件套的路径
+    toolchain_probe
     write_gateway_py
     write_rotate
+    # buyer 的 unit 也一并刷新:历史版本里它缺 PATH,导致 npm 找不到、
+    # buyer 无限重启、8378 起不来。升级时必须把这份 unit 覆盖掉才算真修好。
+    write_buyer_unit
     write_gateway_unit
     write_rotate_unit
     run systemctl daemon-reload
     run systemctl restart antseed-gateway.service
+    # unit 内容变了(buyer 补 PATH),不重启就还是旧的运行态
+    if systemctl is-enabled --quiet antseed-buyer.service 2>/dev/null; then
+        run_q systemctl restart antseed-buyer.service || true
+        if wait_upstream; then
+            log "buyer 已重启并就绪"
+        else
+            warn "buyer 重启后仍未就绪: journalctl -u antseed-buyer -n 40 --no-pager"
+        fi
+    fi
     if wait_health; then
         log "升级完成, /health 正常"
         [ "$DRY_RUN" = "1" ] || curl -fsS -m 5 "http://127.0.0.1:$GW_PORT/health" | "$PYBIN" -m json.tool 2>/dev/null || true
@@ -2422,27 +2463,8 @@ EOF
 write_gateway_py
 write_rotate
 
-write_file "$BUYER_UNIT" 0644 <<EOF
-[Unit]
-Description=Antseed buyer (P2P inference client)
-After=network-online.target
-Wants=network-online.target
+write_buyer_unit
 
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/root
-EnvironmentFile=$BUYER_ENV
-ExecStart=$NODE_BIN $ANTSEED_BIN buyer start --port $BUYER_PORT
-Restart=always
-RestartSec=10
-TimeoutStopSec=20
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
 
 write_gateway_unit
 write_rotate_unit
@@ -2453,19 +2475,34 @@ run_q systemctl enable antseed-buyer.service || true
 run systemctl restart antseed-buyer.service
 
 wait_upstream() {
-    local i
+    local i nr nr0
     [ "$DRY_RUN" = "1" ] && return 0
+    nr0="$(systemctl show -p NRestarts --value antseed-buyer 2>/dev/null || echo 0)"
     for i in $(seq 1 45); do
         if curl -fsS -m 3 "http://127.0.0.1:$BUYER_PORT/v1/models" >/dev/null 2>&1; then
             log "buyer 就绪 (port $BUYER_PORT, 约 $((i * 2 - 2))s)"
             return 0
+        fi
+        # 崩了在重启就别干等满 90s —— 每次重启都说明这一轮已经失败了
+        if [ $((i % 5)) -eq 0 ]; then
+            nr="$(systemctl show -p NRestarts --value antseed-buyer 2>/dev/null || echo 0)"
+            case "$nr" in ''|*[!0-9]*) nr=0 ;; esac
+            if [ "$nr" -ge 2 ] && [ "$nr" -gt "${nr0:-0}" ]; then
+                warn "buyer 已重启 ${nr} 次仍未监听 ${BUYER_PORT},不再空等"
+                return 1
+            fi
         fi
         sleep 2
     done
     return 1
 }
 if ! wait_upstream; then
-    warn "buyer 90s 内未在 ${BUYER_PORT} 就绪,继续装网关"
+    warn "buyer 未在 ${BUYER_PORT} 就绪,继续装网关(网关会一直重试上游)"
+    _why="$(journalctl -u antseed-buyer -n 60 --no-pager 2>/dev/null \
+            | grep -m1 -E 'Cause: |Cannot install|npm was not found|Error: ' || true)"
+    if [ -n "$_why" ]; then
+        warn "  首条错误: ${_why#*: }"
+    fi
     warn "  journalctl -u antseed-buyer -n 40 --no-pager"
     if [ "$DRY_RUN" != "1" ] && command -v ss >/dev/null 2>&1; then
         # buyer 若被别的东西占了默认端口,这里能直接看出实际监听在哪
@@ -2488,7 +2525,12 @@ if [ "$DRY_RUN" != "1" ]; then
                     "http://127.0.0.1:$GW_PORT/v1/models" 2>/dev/null || echo '{}')"
         n_models="$(printf '%s' "$models" | "$PYBIN" -c \
             'import sys,json;print(len(json.load(sys.stdin).get("data",[])))' 2>/dev/null || echo '?')"
-        log "自检通过: /health OK, /v1/models 返回 ${n_models} 个条目"
+        if [ "$n_models" = "0" ] || [ "$n_models" = "?" ]; then
+            warn "/health OK,但 /v1/models 返回 ${n_models} 个条目 —— 上游还没就绪"
+            warn "  curl 127.0.0.1:${BUYER_PORT}/v1/models; journalctl -u antseed-buyer -n 40 --no-pager"
+        else
+            log "自检通过: /health OK, /v1/models 返回 ${n_models} 个条目"
+        fi
         printf '%s' "$health" | "$PYBIN" -c \
             'import sys,json;d=json.load(sys.stdin);print("      healthy:", ", ".join(d.get("healthy") or ["(首轮探活中)"]) or "-", "-> auto 落到:", d.get("will_route_to") or "-")' \
             2>/dev/null || true
