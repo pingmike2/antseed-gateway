@@ -579,8 +579,14 @@ cleanup() { rm -rf "$TMPDIR_INSTALL"; }
 trap cleanup EXIT
 
 # ---------------- 环境检查 ----------------
-command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] \
-    || die "需要 systemd(容器 / OpenVZ / WSL1 不支持;WSL2 请先启用 systemd)"
+if ! { command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; }; then
+    # --dry-run 只是预演,不该被宿主环境拦下(容器 / WSL2 / 无 systemd 的机器上也要能看流程)
+    if [ "$DRY_RUN" = "1" ]; then
+        warn "当前环境没有 systemd(容器 / OpenVZ / WSL1 / WSL2 未启用);DRY-RUN 继续预演,真实安装会失败"
+    else
+        die "需要 systemd(容器 / OpenVZ / WSL1 不支持;WSL2 请先启用 systemd)"
+    fi
+fi
 
 if   command -v apt-get >/dev/null 2>&1; then PM=apt
 elif command -v dnf     >/dev/null 2>&1; then PM=dnf
@@ -590,7 +596,7 @@ elif command -v apk     >/dev/null 2>&1; then
     die "检测到 Alpine(apk):官方 Node 24 依赖 glibc、buyer 常驻约 240MB 内存,不支持"
 else
     if [ "$DRY_RUN" = "1" ]; then
-        PM=none; warn "未识别的包管理器(干跑继续,真实安装会中止)"
+        PM=none
     else
         die "无法识别的包管理器,仅支持 apt / dnf / yum / pacman"
     fi
@@ -868,11 +874,15 @@ install_deps() {
                 else
                     pacman -Q "$p" >/dev/null 2>&1 || missing="$missing $p"
                 fi ;;
-            none) missing="" ;;
+            none) : ;;      # 干跑且没有包管理器:能确认的缺失(curl)照常累计,其余无法探测
         esac
     done
     if [ -z "$missing" ]; then
         log "系统依赖已齐全,跳过包管理"
+        return 0
+    fi
+    if [ "$PM" = "none" ]; then
+        warn "未识别的包管理器,无法自动安装:${missing}(干跑继续;真实安装会中止)"
         return 0
     fi
     log "安装缺失依赖:${missing}"
