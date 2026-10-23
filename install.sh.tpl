@@ -1013,6 +1013,29 @@ StandardError=journal
 EOF
 }
 
+wait_upstream() {
+    local i nr nr0
+    [ "$DRY_RUN" = "1" ] && return 0
+    nr0="$(systemctl show -p NRestarts --value antseed-buyer 2>/dev/null || echo 0)"
+    for i in $(seq 1 45); do
+        if curl -fsS -m 3 "http://127.0.0.1:$BUYER_PORT/v1/models" >/dev/null 2>&1; then
+            log "buyer 就绪 (port $BUYER_PORT, 约 $((i * 2 - 2))s)"
+            return 0
+        fi
+        # 崩了在重启就别干等满 90s —— 每次重启都说明这一轮已经失败了
+        if [ $((i % 5)) -eq 0 ]; then
+            nr="$(systemctl show -p NRestarts --value antseed-buyer 2>/dev/null || echo 0)"
+            case "$nr" in ''|*[!0-9]*) nr=0 ;; esac
+            if [ "$nr" -ge 2 ] && [ "$nr" -gt "${nr0:-0}" ]; then
+                warn "buyer 已重启 ${nr} 次仍未监听 ${BUYER_PORT},不再空等"
+                return 1
+            fi
+        fi
+        sleep 2
+    done
+    return 1
+}
+
 wait_health() {
     local i
     [ "$DRY_RUN" = "1" ] && return 0
@@ -1400,29 +1423,6 @@ log "启动服务..."
 run systemctl daemon-reload
 run_q systemctl enable antseed-buyer.service || true
 run systemctl restart antseed-buyer.service
-
-wait_upstream() {
-    local i nr nr0
-    [ "$DRY_RUN" = "1" ] && return 0
-    nr0="$(systemctl show -p NRestarts --value antseed-buyer 2>/dev/null || echo 0)"
-    for i in $(seq 1 45); do
-        if curl -fsS -m 3 "http://127.0.0.1:$BUYER_PORT/v1/models" >/dev/null 2>&1; then
-            log "buyer 就绪 (port $BUYER_PORT, 约 $((i * 2 - 2))s)"
-            return 0
-        fi
-        # 崩了在重启就别干等满 90s —— 每次重启都说明这一轮已经失败了
-        if [ $((i % 5)) -eq 0 ]; then
-            nr="$(systemctl show -p NRestarts --value antseed-buyer 2>/dev/null || echo 0)"
-            case "$nr" in ''|*[!0-9]*) nr=0 ;; esac
-            if [ "$nr" -ge 2 ] && [ "$nr" -gt "${nr0:-0}" ]; then
-                warn "buyer 已重启 ${nr} 次仍未监听 ${BUYER_PORT},不再空等"
-                return 1
-            fi
-        fi
-        sleep 2
-    done
-    return 1
-}
 if ! wait_upstream; then
     warn "buyer 未在 ${BUYER_PORT} 就绪,继续装网关(网关会一直重试上游)"
     _why="$(journalctl -u antseed-buyer -n 60 --no-pager 2>/dev/null \
