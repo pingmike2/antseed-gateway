@@ -613,6 +613,8 @@ for arg in "$@"; do
         --force|--reinstall) FORCE_INSTALL=1 ;;
         --force-rotate) FORCE_ROTATE=1 ;;
         --key=*) API_KEY="${arg#*=}"; GIVEN_KEY=1 ;;
+        --apikey=*) API_KEY="${arg#*=}"; GIVEN_KEY=1 ;;
+        --apikey) API_KEY="${2-}"; GIVEN_KEY=1; shift ;;
         --port=*) GW_PORT="${arg#*=}"; GIVEN_PORT=1 ;;
         --public-host=*) PUBLIC_HOST="${arg#*=}" ;;
         --check) CHECK_ONLY=1 ;;
