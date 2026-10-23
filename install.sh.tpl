@@ -756,7 +756,10 @@ if [ "$#" -eq 0 ] && [ "$ACTION" = "install" ] && [ "${NO_MENU:-0}" != "1" ] && 
     MENU_OK=0
     # 首选 /dev/tty:bash <(curl ...) 把 fd 0 换成了管道,终端仍挂在 /dev/tty
     if { : </dev/tty; } 2>/dev/null && { : >/dev/tty; } 2>/dev/null; then
-        if exec 3</dev/tty 4>/dev/tty 2>/dev/null; then
+        # 注意:这里**不能**带 2>/dev/null —— exec 的重定向是永久的,
+        # 会把整个脚本的 stderr 接到 /dev/null,菜单提示("选择 [0-7]: ")
+        # 和后面所有 warn/报错全都消失。可用性上面已经探测过了。
+        if exec 3</dev/tty 4>/dev/tty; then
             MENU_TTY=1
             MENU_OK=1
         fi
