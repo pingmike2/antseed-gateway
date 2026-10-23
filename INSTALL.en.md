@@ -129,7 +129,18 @@ bash install.sh                     # install again
 
 ## 3. The menu
 
-Run `bash install.sh`. **Single keypress selects — no Enter needed.**
+After installing, a shortcut exists on disk — `antseed-gw` (created by the installer). **No need to paste the long command again:**
+
+```bash
+antseed-gw                # open the menu
+antseed-gw status         # status + self-check
+antseed-gw upgrade        # upgrade
+antseed-gw logs -f        # follow logs
+```
+
+Each run fetches the latest installer first (so upgrades always use the current one); if the network is down it falls back to the local copy at `/usr/local/share/antseed-gateway/install.sh`. Uninstalling removes it too.
+
+You can also run `bash install.sh` directly. **Single keypress selects — no Enter needed.**
 
 ```
 ==================================================

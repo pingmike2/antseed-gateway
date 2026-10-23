@@ -26,7 +26,7 @@ apikey='your-key' bash install.sh install
 # 先看它要干什么
 bash install.sh --dry-run
 
-# 从 URL 装
+# 从 URL 装(装完生成快捷入口 antseed-gw,以后直接 `antseed-gw` 进菜单)
 bash <(curl -fsSL https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
 
 # 英文输出(默认中文)

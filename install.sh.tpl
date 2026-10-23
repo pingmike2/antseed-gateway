@@ -195,6 +195,7 @@ declare -A _I18N_STATIC=(
     ["  API Key(留空=沿用已有/自动生成): "]="  API Key (blank = keep existing / auto-generate): "
     ["  连 /etc/antseed 配置与节点身份一起删? [y/N] "]="  also delete /etc/antseed config and node identity? [y/N] "
     ["  1=最近 60 行  2=实时跟随  [1]: "]="  1=last 60 lines  2=follow live  [1]: "
+    ["  快捷入口: antseed-gw   (直接进菜单;antseed-gw status / upgrade / logs)"]="  quick command: antseed-gw   (opens the menu; antseed-gw status / upgrade / logs)"
 )
 _I18N_RE=(
     'would run: (.+?)'
@@ -497,6 +498,8 @@ read_env() {
 SELF_PATH=""
 SELF_URL="${INSTALL_URL:-https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh}"
 SELF_IS_PIPE=0
+GW_LAUNCHER=/usr/local/bin/antseed-gw
+GW_CACHE=/usr/local/share/antseed-gateway/install.sh
 _self_src="${BASH_SOURCE[0]:-$0}"
 case "$_self_src" in
     /dev/fd/*|/proc/*/fd/*|/dev/stdin|-) SELF_IS_PIPE=1 ;;
@@ -559,6 +562,48 @@ menu_self() {
 }
 
 TMPDIR_INSTALL="${TMPDIR_INSTALL:-/tmp}"
+
+# ---------------- 快捷入口 antseed-gw ----------------
+# 用 `bash <(curl ...)` 装完之后磁盘上没有任何 install.sh,想再进菜单就得重新敲
+# 那条长命令。装一次就把安装器留一份到 $GW_CACHE,再放一个 $GW_LAUNCHER 壳:
+# 以后 `antseed-gw` 直接进菜单,`antseed-gw status|upgrade|logs` 也能用。
+# 壳优先拉线上最新版(保证升级拿到的是新程序),拉不到才用本地副本。
+install_launcher() {
+    [ "$DRY_RUN" = "1" ] && { log "would install launcher: $GW_LAUNCHER"; return 0; }
+    local src
+    mkdir -p "$(dirname "$GW_CACHE")" 2>/dev/null || true
+    src="$(self_copy 2>/dev/null || true)"
+    if [ -n "$src" ] && [ -s "$src" ] && [ "$src" != "$GW_CACHE" ]; then
+        cp -f "$src" "$GW_CACHE" 2>/dev/null && chmod 0755 "$GW_CACHE" 2>/dev/null || true
+    fi
+    cat > "$GW_LAUNCHER" <<'ANTSEED_GW_LAUNCHER'
+#!/usr/bin/env bash
+# antseed-gw — Antseed Gateway 快捷入口 / quick entry
+#   antseed-gw            进菜单 / open the menu
+#   antseed-gw status     状态自检 / status + self-check
+#   antseed-gw upgrade    升级 / upgrade
+#   antseed-gw logs -f    实时日志 / follow logs
+URL="${ANTSEED_INSTALL_URL:-https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh}"
+CACHE="${ANTSEED_INSTALL_CACHE:-/usr/local/share/antseed-gateway/install.sh}"
+if command -v curl >/dev/null 2>&1; then
+    if curl -fsSL --max-time 20 --connect-timeout 8 "$URL" -o "$CACHE.tmp" 2>/dev/null \
+       && [ -s "$CACHE.tmp" ] && bash -n "$CACHE.tmp" 2>/dev/null; then
+        mv -f "$CACHE.tmp" "$CACHE" 2>/dev/null
+        chmod 0755 "$CACHE" 2>/dev/null
+        exec bash "$CACHE" "$@"
+    fi
+    rm -f "$CACHE.tmp" 2>/dev/null
+fi
+if [ -s "$CACHE" ]; then
+    echo "[antseed-gw] 拉不到线上安装器,改用本地副本 / offline, using cached copy" >&2
+    exec bash "$CACHE" "$@"
+fi
+echo "[antseed-gw] 没有可用的安装器: 网络不通且无本地副本 / no installer available" >&2
+echo "  重新安装 / reinstall: bash <(curl -fsSL $URL)" >&2
+exit 1
+ANTSEED_GW_LAUNCHER
+    chmod 0755 "$GW_LAUNCHER" 2>/dev/null || true
+}
 
 # node / npm / antseed 三件套:独立运行时也要能找到
 toolchain_probe() {
@@ -1158,6 +1203,8 @@ do_uninstall() {
     run rm -rf "$GW_UNIT.d" "$BUYER_UNIT.d" "$ROTATE_UNIT.d"
     run rm -f "$GATEWAY_PY" "$ROTATE_SH" /usr/local/bin/antseed-free-filter.py
     run rm -f /etc/profile.d/antseed.sh /etc/profile.d/antseed-node.sh
+    run rm -f "$GW_LAUNCHER"
+    run rm -rf "$(dirname "$GW_CACHE")"
     run rm -f /var/log/antseed-rotate.log /tmp/antseed-rotate.lock
     run rm -rf /run/antseed
 
@@ -1415,6 +1462,7 @@ do_upgrade() {
             warn "buyer 重启后仍未就绪: journalctl -u antseed-buyer -n 40 --no-pager"
         fi
     fi
+    install_launcher
     if wait_health; then
         log "升级完成, /health 正常"
         [ "$DRY_RUN" = "1" ] || curl -fsS -m 5 "http://127.0.0.1:$GW_PORT/health" | "$PYBIN" -m json.tool 2>/dev/null || true
@@ -1825,6 +1873,8 @@ if [ "$DRY_RUN" != "1" ]; then
     fi
 fi
 
+install_launcher
+
 # ---------------- 公网地址 ----------------
 detect_ip() {
     # 单独开子 shell 并摘掉 ERR trap:探测公网 IP 时逐个接口试,失败是正常流程,
@@ -1880,6 +1930,7 @@ if [ "$GW_BIND" = "127.0.0.1" ] || [ "$GW_BIND" = "localhost" ]; then
     echo "$(t '  并强烈建议在前面挂 TLS 反代(Caddy/Nginx),否则 API key 与 prompt 都是明文过网。')"
     echo ""
 fi
+echo "$(t '  快捷入口: antseed-gw   (直接进菜单;antseed-gw status / upgrade / logs)')"
 echo "$(t '  升级:  bash install.sh upgrade')"
 echo "$(t '  卸载:  bash install.sh uninstall [--purge]')"
 echo "=================================================="

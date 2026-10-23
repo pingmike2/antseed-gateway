@@ -26,7 +26,7 @@ apikey='your-key' bash install.sh install
 # see what it would do first
 bash install.sh --dry-run
 
-# install straight from the URL
+# install straight from the URL (creates the `antseed-gw` shortcut — just type it later for the menu)
 bash <(curl -fsSL https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
 ```
 
