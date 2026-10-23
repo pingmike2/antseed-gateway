@@ -74,14 +74,332 @@ if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; NC=$'\033[0m'
 fi
 
-log()  { printf '%s[%s]%s %s\n' "$GREEN" "$PROG" "$NC" "$*"; }
-warn() { printf '%s[%s]%s %s\n' "$YELLOW" "$PROG" "$NC" "$*"; }
-die()  { printf '%s[%s]%s %s\n' "$RED" "$PROG" "$NC" "$*" >&2; exit 1; }
-on_err() { printf '%s[%s]%s 中断于第 %s 行 (exit %s);排错: bash -x %s\n' \
-            "$RED" "$PROG" "$NC" "${1:-?}" "${2:-?}" "${0##*/}" >&2; }
+LANG_CODE="${LANG_CODE:-zh}"
+
+# ---------------- 多语言: 默认中文, LANG_CODE=en / --lang=en 切英文 ----------------
+# 所有用户可见输出都过 t();未收录的句子原样返回中文,不会变成空行。
+declare -A _I18N_STATIC=(
+    ["找不到 node:还没装或不在 PATH 里,先跑一次安装"]="node not found: not installed or not on PATH — run the installer once"
+    ["查询不到最新版本(npm 不可用或没网),保持现状不动"]="cannot query the latest version (npm unavailable or offline); leaving everything as is"
+    ["(--check 模式:只报告不安装)"]="(--check mode: report only, no install)"
+    ["已跳过,保持现状"]="skipped, left as is"
+    ["would restart antseed-buyer"]="would restart antseed-buyer"
+    ["重启 antseed-buyer 让新 CLI 生效..."]="restarting antseed-buyer so the new CLI takes effect..."
+    ["buyer 90s 内未就绪: journalctl -u antseed-buyer -n 60 --no-pager"]="buyer not ready within 90s: journalctl -u antseed-buyer -n 60 --no-pager"
+    ["读不到 API key,跳过 HTTP 自检"]="no API key found; skipping the HTTP self-check"
+    ["没有 journalctl,无法查看日志"]="journalctl not available; cannot show logs"
+    ["实时日志(Ctrl-C 退出)..."]="live logs (Ctrl-C to quit)..."
+    ["已更新 API Key"]="API key updated"
+    ["只接受 0 或 1"]="only 0 or 1 is accepted"
+    ["只接受数字"]="digits only"
+    ["无效选择"]="invalid choice"
+    ["网关已重启并恢复"]="gateway restarted and recovered"
+    ["重启后 30s 内 /health 未就绪: journalctl -u antseed-gateway -n 60"]="/health not ready within 30s after restart: journalctl -u antseed-gateway -n 60 --no-pager"
+    ["拿不到可重执行的脚本副本(离线?)。请在本地已下载的 install.sh 上跑菜单。"]="cannot fetch a re-executable copy of the script (offline?). run the menu from a locally downloaded install.sh."
+    ["拿不到可重执行的脚本副本(离线?)。请用: bash install.sh upgrade"]="cannot fetch a re-executable copy of the script (offline?). use: bash install.sh upgrade"
+    ["升级返回非零"]="upgrade exited non-zero"
+    ["拿不到可重执行的脚本副本(离线?)。请用: bash install.sh uninstall [--purge]"]="cannot fetch a re-executable copy of the script (offline?). use: bash install.sh uninstall [--purge]"
+    ["卸载返回非零"]="uninstall exited non-zero"
+    ["拿不到可重执行的脚本副本(离线?)。请用: bash install.sh update-cli"]="cannot fetch a re-executable copy of the script (offline?). use: bash install.sh update-cli"
+    ["退出"]="bye"
+    ["DRY-RUN: 下面只显示将要执行的操作"]="DRY-RUN: the following only shows what would be done"
+    ["检测到 WSL,但 systemd 未启用 —— 服务装上了也不会自启/被管理。"]="WSL detected but systemd is not enabled — services would install yet never be managed or auto-started."
+    ["先启用: 编辑 /etc/wsl.conf 加 [boot] 段 + systemd=true,然后在 Windows 里 wsl --shutdown 再进"]="enable it first: add a [boot] section with systemd=true to /etc/wsl.conf, then run wsl --shutdown in Windows and come back"
+    ["检测到 WSL + systemd,按普通 Linux 处理"]="WSL + systemd detected; treating it as a regular Linux host"
+    ["这是 macOS,本安装器只支持 Linux(VPS/云主机/WSL)。
+  替代方案: 用 Docker 或一台 Linux VPS 跑;macOS 上装 systemd 服务没有意义。"]="this is macOS. the installer only supports Linux (VPS / cloud / WSL).
+  alternative: run it in Docker or on a Linux VPS; installing a systemd service on macOS is meaningless."
+    ["这是 Windows 的 Git Bash / MSYS,不是真 Linux —— 装不了 systemd 服务。
+  三种正确姿势:
+    1) WSL2(推荐): PowerShell 里 wsl --install,进 Ubuntu 后启用 systemd:
+         sudo sh -c 'echo -e \\\"[boot]\\\\nsystemd=true\\\" > /etc/wsl.conf'
+         然后在 PowerShell 里 wsl --shutdown,重进 WSL,再跑本安装器
+    2) 直接用一台 Linux VPS(Debian/Ubuntu),SSH 上去跑
+    3) Docker Desktop 里起一个 ubuntu 容器(需 --privileged 才能用 systemd)
+  本安装器目标机必须能跑 systemd。"]="this is Windows Git Bash / MSYS, not real Linux — systemd services cannot be installed here.
+  three correct options:
+    1) WSL2 (recommended): wsl --install in PowerShell, then enter Ubuntu"
+    ["请用 root 运行: sudo -i 后重跑,或 sudo apikey=... bash install.sh"]="run as root: sudo -i then rerun, or sudo apikey=... bash install.sh"
+    ["FREE_ONLY 只能是 0 或 1"]="FREE_ONLY must be 0 or 1"
+    ["AUTO_ROTATE 只能是 0 或 1"]="AUTO_ROTATE must be 0 or 1"
+    ["FALLBACK_ORDER 只允许字母/数字/.-,_"]="FALLBACK_ORDER allows only letters/digits/.-,_"
+    ["当前环境没有 systemd(容器 / OpenVZ / WSL1 / WSL2 未启用);DRY-RUN 继续预演,真实安装会失败"]="no systemd in this environment (container / OpenVZ / WSL1 / WSL2 without systemd); DRY-RUN continues, a real install would fail"
+    ["需要 systemd(容器 / OpenVZ / WSL1 不支持;WSL2 请先启用 systemd)"]="systemd is required (containers / OpenVZ / WSL1 are unsupported; on WSL2 enable systemd first)"
+    ["检测到 Alpine(apk):官方 Node 24 依赖 glibc、buyer 常驻约 240MB 内存,不支持"]="Alpine (apk) detected: the official Node 24 build needs glibc, and buyer idles at ~240MB RAM — unsupported"
+    ["无法识别的包管理器,仅支持 apt / dnf / yum / pacman"]="unrecognised package manager; only apt / dnf / yum / pacman are supported"
+    ["python3 未安装(apt install python3 / dnf install python3)"]="python3 is not installed (apt install python3 / dnf install python3)"
+    ["非交互环境,直接安装(想要菜单: bash install.sh menu)"]="non-interactive environment; installing directly (for the menu: bash install.sh menu)"
+    ["停止并移除服务..."]="stopping and removing services..."
+    ["清理残留进程..."]="cleaning up leftover processes..."
+    ["删除 unit 与程序..."]="removing units and programs..."
+    ["删除配置、节点身份与本地数据..."]="removing config, node identity and local data..."
+    ["端口已释放"]="ports released"
+    ["卸载完成"]="uninstall complete"
+    ["网关程序语法检查失败"]="gateway program failed its syntax check"
+    ["buyer 已重启并就绪"]="buyer restarted and ready"
+    ["buyer 重启后仍未就绪: journalctl -u antseed-buyer -n 40 --no-pager"]="buyer still not ready after restart: journalctl -u antseed-buyer -n 40 --no-pager"
+    ["升级完成, /health 正常"]="upgrade complete, /health is healthy"
+    ["升级后 /health 30s 内未就绪: journalctl -u antseed-gateway -n 80 --no-pager"]="/health not ready within 30s after upgrade: journalctl -u antseed-gateway -n 80 --no-pager"
+    ["系统依赖已齐全,跳过包管理"]="all system dependencies present; skipping the package manager"
+    ["干跑:跳过依赖安装"]="dry-run: skipping dependency install"
+    ["python3 仍不可用"]="python3 is still unavailable"
+    ["Node 安装包 SHA256 校验失败"]="Node tarball failed SHA256 verification"
+    ["系统 Node 缺少 npm,请安装完整 nodejs 包"]="the system Node has no npm; install the full nodejs package"
+    ["SKIP_NODE=1 但系统 Node 不可用(需要 >= v24)"]="SKIP_NODE=1 but the system Node is unusable (needs >= v24)"
+    ["npm 支持 --allow-scripts,放行 4 个原生依赖的构建脚本"]="npm supports --allow-scripts; allowing build scripts for 4 native dependencies"
+    ["CLI 未就绪,安装编译依赖后重试一次"]="CLI not ready; installing build dependencies and retrying once"
+    ["已自动生成 API key"]="generated an API key automatically"
+    ["API key 已变更,记得同步更新客户端配置"]="API key changed; remember to update your client config"
+    ["API key 只允许 [A-Za-z0-9._~+/=-](不能含空格/引号/换行)"]="API key allows only [A-Za-z0-9._~+/=-] (no spaces/quotes/newlines)"
+    ["启动服务..."]="starting services..."
+    ["  journalctl -u antseed-buyer -n 40 --no-pager"]="  journalctl -u antseed-buyer -n 40 --no-pager"
+    ["等待网关就绪..."]="waiting for the gateway to come up..."
+    ["等待首轮探活完成(最多 90s)..."]="waiting for the first health probe to finish (up to 90s)..."
+    ["端到端自检通过: 真实补全请求成功 (model=auto)"]="end-to-end self-check passed: a real completion succeeded (model=auto)"
+    ["真实补全请求未成功,先看: journalctl -u antseed-gateway -n 60 --no-pager"]="the real completion failed; check first: journalctl -u antseed-gateway -n 60 --no-pager"
+    ["  常见原因: 节点刚上线还没被 P2P 网络分配到 peer,过几分钟再试"]="  common cause: a fresh node has not been assigned a peer by the P2P network yet; try again in a few minutes"
+    ["网关 30s 内未响应 /health: journalctl -u antseed-gateway -n 80 --no-pager"]="the gateway did not answer /health within 30s: journalctl -u antseed-gateway -n 80 --no-pager"
+    ["    model:    auto          # 也可写具体模型名"]="    model:    auto          # or a concrete model id"
+    ["   网关 %-6s %-9s  CLI %-9s 端口 %s\\n"]="   gateway %-6s %-9s  CLI %-9s port %s\\n"
+    ["  0) 返回"]="  0) back"
+    ["  0) 退出"]="  0) quit"
+    ["  1) 安装 / 重装网关        (保留已有配置与节点身份)"]="  1) install / reinstall    (keeps existing config and node identity)"
+    ["  2) FREE_ONLY      %s      (1=只用免费模型, 0=允许付费)\\n"]="  2) FREE_ONLY      %s      (1=free models only, 0=allow paid)\\n"
+    ["  2) 升级网关程序           (只换程序与 unit,不动配置)"]="  2) upgrade gateway        (program + units only, config untouched)"
+    ["  3) 卸载网关               (可选连配置与身份一起删)"]="  3) uninstall gateway      (optionally delete config and identity)"
+    ["  3) 监听地址       %s\\n"]="  3) bind address   %s\\n"
+    ["  4) 对外端口       %s\\n"]="  4) public port    %s\\n"
+    ["  4) 更新官方 CLI           (检测到新版才装 @antseed/cli)"]="  4) update official CLI    (installs @antseed/cli only when newer)"
+    ["  5) FALLBACK_NAMED %s      (1=点名模型失败后换模型)\\n"]="  5) FALLBACK_NAMED %s      (1=fall back when a named model fails)\\n"
+    ["  5) 状态与自检             (/health、模型、端口)"]="  5) status & self-check    (/health, models, ports)"
+    ["  6) AUTO_ROTATE    %s      (1=402 时换节点身份)\\n"]="  6) AUTO_ROTATE    %s      (1=rotate identity on 402)\\n"
+    ["  6) 查看日志               (最近 60 行 / 实时跟随)"]="  6) logs                   (last 60 lines / follow live)"
+    ["  7) 修改配置               (API key、端口、FREE_ONLY…)"]="  7) edit config            (API key, port, FREE_ONLY…)"
+    ["  7) 探活周期       %ss  / 目录缓存 %ss\\n"]="  7) probe interval %ss  / catalog cache %ss\\n"
+    ["  准备执行副本(最多 20s)..."]="  preparing an executable copy (up to 20s)..."
+    ["  升级:  bash install.sh upgrade"]="  upgrade:   bash install.sh upgrade"
+    ["  卸载:  bash install.sh uninstall [--purge]"]="  uninstall: bash install.sh uninstall [--purge]"
+    ["  常用命令:"]="  common commands:"
+    ["  并强烈建议在前面挂 TLS 反代(Caddy/Nginx),否则 API key 与 prompt 都是明文过网。"]="  strongly recommended: put a TLS reverse proxy (Caddy/Nginx) in front, otherwise the API key and prompts cross the network in plaintext."
+    ["  查询 npm registry 上的最新版本..."]="  querying the npm registry for the latest version..."
+    ["  监听:"]="  listening:"
+    ["==================== 修改配置 ===================="]=" ==================== edit config ===================="
+    ["===================== 服务 ====================="]=" ===================== services ======================"
+    ["===================== 配置 ====================="]=" ===================== config ========================"
+    ["[rotate] 完成,buyer 已就绪"]="[rotate] done, buyer is ready"
+    ["[rotate] 警告: buyer 120s 内未就绪"]="[rotate] warning: buyer not ready within 120s"
+    ["\\n  按回车返回菜单..."]="\\n  press Enter to return to the menu..."
+    ["官方 CLI"]="official CLI"
+    ["网关程序"]="gateway"
+    ["  选择 [0-7] (单键即选): "]="  select [0-7] (single key): "
+    ["  API Key(留空=沿用已有/自动生成): "]="  API Key (blank = keep existing / auto-generate): "
+    ["  连 /etc/antseed 配置与节点身份一起删? [y/N] "]="  also delete /etc/antseed config and node identity? [y/N] "
+    ["  1=最近 60 行  2=实时跟随  [1]: "]="  1=last 60 lines  2=follow live  [1]: "
+)
+_I18N_RE=(
+    'would run: (.+?)'
+    'would write (.+?) \((.+?), (.+?)B\)'
+    'would set (.+?) in (.+?)'
+    '当前 CLI: (.+?)  \((.+?)\)'
+    '确认是官方 npm 包: (.+?)'
+    '读不到 (.+?) 的真实路径\(可能还没装\)'
+    '它不指向 @antseed/cli 包目录: (.+?) —— 仍按 npm 官方包处理'
+    '已是最新\((.+?)\),不做任何改动'
+    '发现新版本: (.+?) -> (.+?)'
+    'npm install -g (.+?)@(.+?) \.\.\.'
+    '更新后 (.+?) 不见了,回滚: npm install -g (.+?)@(.+?)'
+    '更新后版本: (.+?)'
+    'buyer 已就绪\(端口 (.+?)\)'
+    '完成。网关会在 (.+?)s 内自动刷新模型目录,无需重启'
+    '实时跟随: bash (.+?) logs --follow'
+    '找不到 (.+?),先跑一次安装'
+    '已设为 (.+?)'
+    '无效选择: (.+?)'
+    '未知参数: (.+?)'
+    '不支持的系统: (.+?)\(只支持 Linux,含 WSL2\)'
+    'GATEWAY_PORT 必须是数字: (.+?)'
+    'GATEWAY_PORT 越界: (.+?)'
+    'BUYER_PORT 必须是数字: (.+?)'
+    '已保留 (.+?) 与 /root/\.antseed\(含节点身份\)。要一并删除: bash (.+?) uninstall --purge'
+    '端口 (.+?)/(.+?) 仍被占用: ss -ltnp \| grep -E '\''(.+?)\|(.+?)'\'''
+    '网关程序落地: (.+?)'
+    'buyer 就绪 \(port (.+?), 约 (.+?)s\)'
+    '仍在等 buyer\(已 (.+?)s\):首次启动要装 P2P 插件,慢机器可达数分钟'
+    'buyer 已重启 (.+?) 次仍未监听 (.+?),不再空等'
+    '升级网关到 (.+?)\(保留 (.+?) 与节点身份\)\.\.\.'
+    '干跑:(.+?) 不存在,真实运行会中止'
+    '找不到 (.+?),请先完整安装: bash (.+?)'
+    '未识别的包管理器,无法自动安装:(.+?)\(干跑继续;真实安装会中止\)'
+    '安装缺失依赖:(.+?)'
+    '系统 Node (.+?) < v24,改用内置 Node'
+    '不支持的架构: (.+?)'
+    '仅支持 Linux,当前 (.+?)'
+    'would download (.+?)/(.+?) \(SHA256 校验后解压到 (.+?)\)'
+    '下载 Node (.+?) \((.+?)\)\.\.\.'
+    '拿不到 Node (.+?) 的校验文件\(版本可能不存在\),用 NODE_VERSION=vX\.Y\.Z 指定实际版本'
+    'SHASUMS256\.txt 中没有 (.+?)'
+    '复用系统 Node: (.+?) \(prefix=(.+?)\)'
+    '安装 @antseed/cli@(.+?) \.\.\.'
+    'CLI 安装失败:(.+?) 不存在'
+    '端口 (.+?) 仍被占用: ss -ltnp \| grep '\'':(.+?)'\'''
+    '复用已有 API key\(要换: apikey=新key bash (.+?) --key=新key\)'
+    'API key 只有 (.+?) 字符,建议 >= 32'
+    '复用已有节点身份: (.+?)\.\.\.'
+    '生成新节点身份: (.+?)\.\.\.'
+    '复用已有 (.+?):只更新显式传入的项,其余\(含手改\)保留'
+    'buyer 5 分钟内未在 (.+?) 就绪,继续装网关\(网关会一直重试上游\)'
+    '  首条错误: (.+?)'
+    '注意: (.+?) 已被占用,网关将无法监听,先清掉: ss -ltnp \| grep '\'':(.+?)'\'''
+    '/health OK,但 /v1/models 返回 (.+?) 个条目 —— 上游还没就绪'
+    '  curl 127\.0\.0\.1:(.+?)/v1/models; journalctl -u antseed-buyer -n 40 --no-pager'
+    '自检通过: /health OK, /v1/models 返回 (.+?) 个条目'
+    '    端口 (.+?)/(.+?) 上没有监听'
+    '   Antseed Gateway 管理菜单      安装器 v(.+?)'
+    '  (.+?) 不存在\(未安装或已 purge\)'
+    '  \(文件 (.+?)\)'
+    '  Antseed Gateway (.+?) 安装完成'
+    '  代理地址:  http://(.+?):(.+?)/v1'
+    '  当前只监听本机。要从外面访问: 把 (.+?) 里 GATEWAY_BIND 改成 :: 或 0\.0\.0\.0,'
+    '  模型过滤:  FREE_ONLY=(.+?) \(1=仅免费, 0=全部\)'
+    '  监听:      (.+?):(.+?)    \(改 (.+?)\)'
+    '  自动换身份: AUTO_ROTATE=(.+?)'
+    '\[rotate\] 另一轮轮换进行中\((.+?)s\),跳过'
+    '\[rotate\] 清理过期锁\((.+?)s\)'
+)
+_I18N_FMT=(
+    'would run: %s'
+    'would write %s (%s, %sB)'
+    'would set %s in %s'
+    'current CLI: %s  (%s)'
+    'verifying the official npm package: %s'
+    'cannot resolve the real path of %s (maybe not installed yet)'
+    'it does not point at the @antseed/cli package dir: %s — treating it as an official npm package anyway'
+    'already latest (%s), nothing to do'
+    'new version found: %s -> %s'
+    'npm install -g %s@%s ...'
+    '%s vanished after the update, rolling back: npm install -g %s@%s'
+    'version after update: %s'
+    'buyer is ready (port %s)'
+    'done. the gateway refreshes its model catalog within %ss; no restart needed'
+    'follow live: bash %s logs --follow'
+    '%s not found; run the installer once'
+    'set to %s'
+    'invalid choice: %s'
+    'unknown argument: %s'
+    'unsupported system: %s (Linux only, WSL2 included)'
+    'GATEWAY_PORT must be a number: %s'
+    'GATEWAY_PORT out of range: %s'
+    'BUYER_PORT must be a number: %s'
+    'kept %s and /root/.antseed (including the node identity). to delete them too: bash %s uninstall --purge'
+    'ports %s/%s are still in use: ss -ltnp | grep -E '\''%s/%s'\'''
+    'gateway program written: %s'
+    'buyer ready (port %s, ~%ss)'
+    'still waiting for buyer (%ss): the first start installs a P2P plugin, which can take minutes on slow hosts'
+    'buyer restarted %s times and still is not listening on %s; no point waiting further'
+    'upgrading the gateway to %s (keeping %s and the node identity)...'
+    'dry-run: %s does not exist; a real run would abort'
+    '%s not found; install first: bash %s'
+    'unrecognised package manager; cannot auto-install: %s (dry-run continues; a real install would abort)'
+    'installing missing dependencies: %s'
+    'system Node %s < v24; switching to the bundled Node'
+    'unsupported architecture: %s'
+    'Linux only; current %s'
+    'would download %s/%s (verified by SHA256, extracted to %s)'
+    'downloading Node %s (%s)...'
+    'cannot fetch the checksum file for Node %s (the version may not exist); set NODE_VERSION=vX.Y.Z to pick a real one'
+    '%s is not listed in SHASUMS256.txt'
+    'reusing the system Node: %s (prefix=%s)'
+    'installing @antseed/cli@%s ...'
+    'CLI install failed: %s does not exist'
+    'port %s is still in use: ss -ltnp | grep '\'':%s'\'''
+    'reusing the existing API key (to change: apikey=NEWKEY bash %s --key=NEWKEY)'
+    'the API key is only %s characters; >= 32 is recommended'
+    'reusing the existing node identity: %s...'
+    'generated a new node identity: %s...'
+    'reusing the existing %s: only explicitly passed values are updated, everything else (including manual edits) is kept'
+    'buyer was not ready on %s within 5 minutes; continuing with the gateway (it keeps retrying the upstream)'
+    '  first error: %s'
+    'warning: %s is already in use, the gateway cannot bind; clear it first: ss -ltnp | grep '\'':%s'\'''
+    '/health OK, but /v1/models returns %s entries — the upstream is not ready yet'
+    '  curl 127.0.0.1:%s/v1/models; journalctl -u antseed-buyer -n 40 --no-pager'
+    'self-check passed: /health OK, /v1/models returns %s entries'
+    '    nothing listening on port %s/%s'
+    '   Antseed Gateway console        installer v%s'
+    '  %s does not exist (not installed, or purged)'
+    '  (file %s)'
+    '  Antseed Gateway %s installed'
+    '  endpoint:  http://%s:%s/v1'
+    '  bound to localhost only. to reach it from outside: set GATEWAY_BIND in %s to :: or 0.0.0.0,'
+    '  model filter:  FREE_ONLY=%s (1=free only, 0=all)'
+    '  listening: %s:%s    (edit %s)'
+    '  auto identity rotation: AUTO_ROTATE=%s'
+    '[rotate] another rotation is in progress (%ss), skipping'
+    '[rotate] clearing a stale lock (%ss)'
+)
+
+t() {
+    local m="$1" i
+    [ "${LANG_CODE:-zh}" = "en" ] || { printf '%s' "$m"; return 0; }
+    case "$m" in
+        "确认是官方 npm 全局包: "*) printf '%s%s' "verifying the official npm global package: " "${m#确认是官方 npm 全局包: }"; return 0 ;;
+        "需要 Python >= 3.7,当前 "*) printf '%s%s' "needs Python >= 3.7, current " "${m#需要 Python >= 3.7,当前 }"; return 0 ;;
+        "Node 校验通过: "*) printf '%s%s' "Node verified: " "${m#Node 校验通过: }"; return 0 ;;
+        "复用已安装的内置 Node: "*) printf '%s%s' "reusing the bundled Node already installed: " "${m#复用已安装的内置 Node: }"; return 0 ;;
+        "@antseed/cli 已装: "*) printf '%s%s' "@antseed/cli already installed: " "${m#@antseed/cli 已装: }"; return 0 ;;
+    esac
+    if [ -n "${_I18N_STATIC[$m]+x}" ]; then printf '%s' "${_I18N_STATIC[$m]}"; return 0; fi
+    for i in "${!_I18N_RE[@]}"; do
+        if [[ $m =~ ${_I18N_RE[i]} ]]; then
+            printf "${_I18N_FMT[i]}" "${BASH_REMATCH[@]:1}"
+            return 0
+        fi
+    done
+    printf '%s' "$m"
+}
+info() { printf '%s[%s]%s %s\n' "$GREEN" "$PROG" "$NC" "$(t "$*")"; }
+
+log()  { printf '%s[%s]%s %s\n' "$GREEN" "$PROG" "$NC" "$(t "$*")"; }
+warn() { printf '%s[%s]%s %s\n' "$YELLOW" "$PROG" "$NC" "$(t "$*")"; }
+die()  { printf '%s[%s]%s %s\n' "$RED" "$PROG" "$NC" "$(t "$*")" >&2; exit 1; }
+on_err() { printf '%s[%s]%s %s\n' \
+            "$RED" "$PROG" "$NC" "$(t "中断于第 ${1:-?} 行 (exit ${2:-?});排错: bash -x ${0##*/}")" >&2; }
 trap 'on_err "$LINENO" "$?"' ERR
 
 usage() {
+    if [ "${LANG_CODE:-zh}" = "en" ]; then
+        cat <<'USAGE_EN'
+Antseed Gateway one-shot installer
+
+Usage:
+  bash install.sh                         interactive menu (install/upgrade/uninstall/update CLI/status/logs/config)
+  apikey=KEY bash install.sh install      install or reinstall directly (non-interactive)
+  bash install.sh --dry-run               print what would happen, change nothing
+  bash install.sh upgrade                 replace the gateway program and units only; keep config and identity
+  bash install.sh uninstall [--purge]     uninstall (--purge also removes config and node identity)
+  bash install.sh update-cli [--check]    check the official @antseed/cli and update /usr/bin/antseed when newer
+  bash install.sh status                  services / gateway / models / ports at a glance
+  bash install.sh logs [--follow]         show logs (--follow to stream)
+  bash install.sh config                  edit config interactively (API key, port, FREE_ONLY…)
+  bash install.sh --force-rotate          force a new node identity on reinstall
+  bash install.sh --lang=en               English output (Chinese by default)
+  bash install.sh --help                  show this help
+
+Skip the menu from scripts/CI: NO_MENU=1 bash install.sh
+
+Common environment variables:
+  apikey=KEY          gateway API key (generated when omitted)
+  FREE_ONLY=0         allow paid models (default 1 = free only)
+  GATEWAY_BIND=::     listen address (dual-stack by default; 127.0.0.1 = local only)
+  GATEWAY_PORT=8377   public port
+  CLI_VERSION=latest  @antseed/cli version (pin it in production)
+  FALLBACK_ORDER=a,b  fallback priority
+  AUTO_ROTATE=1       rotate the node identity on 402 (off by default)
+  FORCE_ROTATE=1      force a new node identity on reinstall
+  PUBLIC_HOST=host    skip public IP detection
+  LANG_CODE=en        English output (same as --lang=en)
+USAGE_EN
+        return 0
+    fi
     cat <<'USAGE'
 Antseed Gateway 一键安装器
 
@@ -96,6 +414,7 @@ Antseed Gateway 一键安装器
   bash install.sh logs [--follow]         查看日志(--follow 实时跟随)
   bash install.sh config                  交互改配置(API key、端口、FREE_ONLY…)
   bash install.sh --force-rotate          重装时强制换节点身份
+  bash install.sh --lang=en               输出英文(默认中文)
   bash install.sh --help                  显示本帮助
 
 配置里想跳过菜单(脚本/CI 用): NO_MENU=1 bash install.sh
@@ -219,7 +538,7 @@ menu_self() {
     # 而菜单还要拿这个副本去执行子动作(卸载/升级),必须先于清理存在。
     SELF_CACHE="/tmp/.antseed-self-$$.sh"
     rm -f "$SELF_CACHE" 2>/dev/null
-    printf '  准备执行副本(最多 20s)...' >&2
+    printf "$(t '  准备执行副本(最多 20s)...')" >&2
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL --max-time 20 --connect-timeout 8 "$SELF_URL" -o "$SELF_CACHE" 2>/dev/null || true
     elif command -v wget >/dev/null 2>&1; then
@@ -342,7 +661,7 @@ do_update_cli() {
                 warn "它不指向 @antseed/cli 包目录: $link —— 仍按 npm 官方包处理"
             fi ;;
     esac
-    printf '  查询 npm registry 上的最新版本...'
+    printf "$(t '  查询 npm registry 上的最新版本...')"
     lat="$(cli_latest)"
     if [ -z "$lat" ]; then
         echo ""
@@ -400,22 +719,22 @@ do_status() {
     port="$(read_env GATEWAY_PORT "$GW_ENV" 2>/dev/null || true)"; port="${port:-$GW_PORT}"
     key="$(read_env ANTSEED_API_KEY "$GW_ENV" 2>/dev/null || true)"; key="${key:-${API_KEY:-}}"
     echo ""
-    echo "===================== 服务 ====================="
+    echo "$(t '===================== 服务 =====================')"
     for u in antseed-gateway antseed-buyer antseed-rotate; do
         state="$(systemctl is-active "$u.service" 2>/dev/null || true)"
-        printf '  %-20s %s\n' "$u" "${state:-未安装}"
+        printf '  %-20s %s\n' "$u" "${state:-$(t '未安装')}"
     done
-    printf '  %-20s %s\n' "网关程序" "$(menu_gw_version)"
-    printf '  %-20s %s\n' "官方 CLI" "$(cli_current)"
-    echo "  监听:"
+    printf '  %-20s %s\n' "$(t '网关程序')" "$(menu_gw_version)"
+    printf '  %-20s %s\n' "$(t '官方 CLI')" "$(cli_current)"
+    echo "$(t '  监听:')"
     if command -v ss >/dev/null 2>&1; then
         if ss -ltn 2>/dev/null | grep -qE ":(${port}|${BUYER_PORT})\b"; then
             ss -ltnp 2>/dev/null | grep -E ":(${port}|${BUYER_PORT})\b" | sed 's/^/    /' || true
         else
-            echo "    端口 ${port}/${BUYER_PORT} 上没有监听"
+            echo "$(t "    端口 ${port}/${BUYER_PORT} 上没有监听")"
         fi
     fi
-    echo "===================== 配置 ====================="
+    echo "$(t '===================== 配置 =====================')"
     if [ -f "$GW_ENV" ]; then
         for k in FREE_ONLY FALLBACK_NAMED AUTO_ROTATE GATEWAY_BIND GATEWAY_PORT \
                  PROBE_INTERVAL MODELS_TTL BLACKLIST_SECONDS SOFT_COOLDOWN DEPOSIT_COOLDOWN \
@@ -424,9 +743,9 @@ do_status() {
             state="$(read_env "$k" "$GW_ENV" 2>/dev/null || true)"
             [ -n "$state" ] && printf '  %-17s %s\n' "$k" "$state"
         done
-        echo "  (文件 $GW_ENV)"
+        echo "$(t "  (文件 $GW_ENV)")"
     else
-        echo "  $GW_ENV 不存在(未安装或已 purge)"
+        echo "$(t "  $GW_ENV 不存在(未安装或已 purge)")"
     fi
     if [ -z "$key" ]; then
         warn "读不到 API key,跳过 HTTP 自检"
@@ -506,15 +825,15 @@ do_config() {
     local k v
     while :; do
         echo ""
-        echo "==================== 修改配置 ===================="
+        echo "$(t '==================== 修改配置 ====================')"
         printf '  1) API Key        %s\n' "$(read_env ANTSEED_API_KEY "$GW_ENV" | sed 's/\(.\{10\}\).*/\1…/')"
-        printf '  2) FREE_ONLY      %s      (1=只用免费模型, 0=允许付费)\n' "$(read_env FREE_ONLY "$GW_ENV")"
-        printf '  3) 监听地址       %s\n' "$(read_env GATEWAY_BIND "$GW_ENV")"
-        printf '  4) 对外端口       %s\n' "$(read_env GATEWAY_PORT "$GW_ENV")"
-        printf '  5) FALLBACK_NAMED %s      (1=点名模型失败后换模型)\n' "$(read_env FALLBACK_NAMED "$GW_ENV")"
-        printf '  6) AUTO_ROTATE    %s      (1=402 时换节点身份)\n' "$(read_env AUTO_ROTATE "$GW_ENV")"
-        printf '  7) 探活周期       %ss  / 目录缓存 %ss\n' "$(read_env PROBE_INTERVAL "$GW_ENV")" "$(read_env MODELS_TTL "$GW_ENV")"
-        echo "  0) 返回"
+        printf "$(t '  2) FREE_ONLY      %s      (1=只用免费模型, 0=允许付费)\n')" "$(read_env FREE_ONLY "$GW_ENV")"
+        printf "$(t '  3) 监听地址       %s\n')" "$(read_env GATEWAY_BIND "$GW_ENV")"
+        printf "$(t '  4) 对外端口       %s\n')" "$(read_env GATEWAY_PORT "$GW_ENV")"
+        printf "$(t '  5) FALLBACK_NAMED %s      (1=点名模型失败后换模型)\n')" "$(read_env FALLBACK_NAMED "$GW_ENV")"
+        printf "$(t '  6) AUTO_ROTATE    %s      (1=402 时换节点身份)\n')" "$(read_env AUTO_ROTATE "$GW_ENV")"
+        printf "$(t '  7) 探活周期       %ss  / 目录缓存 %ss\n')" "$(read_env PROBE_INTERVAL "$GW_ENV")" "$(read_env MODELS_TTL "$GW_ENV")"
+        echo "$(t '  0) 返回')"
         local c; read -r -p "  选择 [0-7]: " c || return 0
         case "$c" in
             1) read -r -p "  新 API Key(回车不改): " v || true
@@ -544,7 +863,7 @@ do_config() {
 # ---------------- 菜单 ----------------
 menu_state() {
     local st; st="$(systemctl is-active antseed-gateway.service 2>/dev/null || true)"
-    printf '%s' "${st:-未安装}"
+    printf '%s' "${st:-$(t '未安装')}"
 }
 # 菜单读输入统一走真实终端:bash <(curl ...) 会把 stdin 顶成 /dev/fd/63,
 # 直接 read 会读到脚本自己的字节流(或者 EOF),菜单当场退出。
@@ -583,26 +902,26 @@ do_menu() {
         gwv="$(menu_gw_version)"
         echo ""
         echo "=================================================="
-        echo "   Antseed Gateway 管理菜单      安装器 v${VERSION}"
+        echo "$(t "   Antseed Gateway 管理菜单      安装器 v${VERSION}")"
         echo "--------------------------------------------------"
-        printf '   网关 %-6s %-9s  CLI %-9s 端口 %s\n' \
-            "${gwv:-未装}" "$(menu_state)" "$(cli_current || echo '未装')" \
+        printf "$(t '   网关 %-6s %-9s  CLI %-9s 端口 %s\n')" \
+            "${gwv:-$(t '未装')}" "$(menu_state)" "$(cli_current || echo '未装')" \
             "$(read_env GATEWAY_PORT "$GW_ENV" 2>/dev/null || echo "$GW_PORT")"
         echo "--------------------------------------------------"
-        echo "  1) 安装 / 重装网关        (保留已有配置与节点身份)"
-        echo "  2) 升级网关程序           (只换程序与 unit,不动配置)"
-        echo "  3) 卸载网关               (可选连配置与身份一起删)"
-        echo "  4) 更新官方 CLI           (检测到新版才装 @antseed/cli)"
-        echo "  5) 状态与自检             (/health、模型、端口)"
-        echo "  6) 查看日志               (最近 60 行 / 实时跟随)"
-        echo "  7) 修改配置               (API key、端口、FREE_ONLY…)"
-        echo "  0) 退出"
+        echo "$(t '  1) 安装 / 重装网关        (保留已有配置与节点身份)')"
+        echo "$(t '  2) 升级网关程序           (只换程序与 unit,不动配置)')"
+        echo "$(t '  3) 卸载网关               (可选连配置与身份一起删)')"
+        echo "$(t '  4) 更新官方 CLI           (检测到新版才装 @antseed/cli)')"
+        echo "$(t '  5) 状态与自检             (/health、模型、端口)')"
+        echo "$(t '  6) 查看日志               (最近 60 行 / 实时跟随)')"
+        echo "$(t '  7) 修改配置               (API key、端口、FREE_ONLY…)')"
+        echo "$(t '  0) 退出')"
         echo "=================================================="
-        menu_key c "  选择 [0-7] (单键即选): "
+        menu_key c "$(t '  选择 [0-7] (单键即选): ')"
         case "$c" in
             1)
                 _ms="$(menu_self)" || die "拿不到可重执行的脚本副本(离线?)。请在本地已下载的 install.sh 上跑菜单。"
-                menu_ask key "  API Key(留空=沿用已有/自动生成): "
+                menu_ask key "$(t '  API Key(留空=沿用已有/自动生成): ')"
                 echo ""
                 if [ -n "$key" ]; then
                     exec env NO_MENU=1 INSTALL_URL="$SELF_URL" bash "$_ms" --key="$key"
@@ -617,7 +936,7 @@ do_menu() {
                 ;;
             3)
                 _ms="$(menu_self)" || die "拿不到可重执行的脚本副本(离线?)。请用: bash install.sh uninstall [--purge]"
-                menu_ask a "  连 /etc/antseed 配置与节点身份一起删? [y/N] "
+                menu_ask a "$(t '  连 /etc/antseed 配置与节点身份一起删? [y/N] ')"
                 case "$a" in
                     [yY]*) NO_MENU=1 bash "$_ms" uninstall --purge || warn "卸载返回非零" ;;
                     *)     NO_MENU=1 bash "$_ms" uninstall || warn "卸载返回非零" ;;
@@ -630,7 +949,7 @@ do_menu() {
                 ;;
             5) do_status ;;
             6)
-                menu_ask a "  1=最近 60 行  2=实时跟随  [1]: " 1
+                menu_ask a "$(t '  1=最近 60 行  2=实时跟随  [1]: ')" 1
                 case "$a" in
                     2) LOG_FOLLOW=1 do_logs ;;
                     *) do_logs ;;
@@ -640,7 +959,7 @@ do_menu() {
             0|q|Q|"") log "退出"; return 0 ;;
             *) warn "无效选择: $c" ;;
         esac
-        printf '\n  按回车返回菜单...' >&2
+        printf "$(t '\n  按回车返回菜单...')" >&2
         if [ "${MENU_TTY:-0}" = "1" ]; then IFS= read -r _ <&3 || return 0; else IFS= read -r _ || return 0; fi
     done
 }
@@ -649,6 +968,8 @@ do_menu() {
 for arg in "$@"; do
     case "$arg" in
         -h|--help) usage; exit 0 ;;
+        --lang=*) LANG_CODE="${arg#*=}" ;;
+        --lang) LANG_CODE="${2-}"; shift ;;
         --version) printf '%s %s\n' "$PROG" "$VERSION"; exit 0 ;;
         --dry-run) DRY_RUN=1 ;;
         --purge) PURGE=1 ;;
@@ -1994,10 +2315,10 @@ if ! mkdir "$LOCK" 2>/dev/null; then
         age=$(( $(date +%s) - $(stat -c %Y "$LOCK" 2>/dev/null || date +%s) ))
     fi
     if [ "$age" -lt 300 ]; then
-        echo "[rotate] 另一轮轮换进行中(${age}s),跳过"
+        echo "$(t "[rotate] 另一轮轮换进行中(${age}s),跳过")"
         exit 0
     fi
-    echo "[rotate] 清理过期锁(${age}s)"
+    echo "$(t "[rotate] 清理过期锁(${age}s)")"
     rm -rf "$LOCK"
     mkdir "$LOCK" 2>/dev/null || { echo "[rotate] 抢锁失败"; exit 0; }
 fi
@@ -2019,14 +2340,14 @@ i=0
 while [ "$i" -lt 60 ]; do
     if curl -fsS -m 3 "$UPSTREAM/v1/models" >/dev/null 2>&1; then
         echo "$(date '+%F %T') buyer ready after $((i * 2))s" >> "$LOG"
-        echo "[rotate] 完成,buyer 已就绪"
+        echo "$(t '[rotate] 完成,buyer 已就绪')"
         exit 0
     fi
     i=$((i + 1))
     sleep 2
 done
 echo "$(date '+%F %T') buyer NOT ready after 120s" >> "$LOG"
-echo "[rotate] 警告: buyer 120s 内未就绪"
+echo "$(t '[rotate] 警告: buyer 120s 内未就绪')"
 exit 0
 ANTSEED_ROTATE_EOF
 }
@@ -2614,25 +2935,25 @@ VPS_IP="${VPS_IP:-127.0.0.1}"
 
 echo ""
 echo "=================================================="
-echo "  Antseed Gateway ${VERSION} 安装完成"
+echo "$(t "  Antseed Gateway ${VERSION} 安装完成")"
 echo "=================================================="
 echo ""
-echo "  代理地址:  http://${VPS_IP}:${GW_PORT}/v1"
+echo "$(t "  代理地址:  http://${VPS_IP}:${GW_PORT}/v1")"
 echo "  API Key:   ${API_KEY}"
-echo "  模型过滤:  FREE_ONLY=${FREE_ONLY} (1=仅免费, 0=全部)"
+echo "$(t "  模型过滤:  FREE_ONLY=${FREE_ONLY} (1=仅免费, 0=全部)")"
 case "$GW_BIND" in
     *:*) BIND_DISPLAY="[${GW_BIND}]" ;;
     *)   BIND_DISPLAY="$GW_BIND" ;;
 esac
-echo "  监听:      ${BIND_DISPLAY}:${GW_PORT}    (改 ${GW_ENV})"
-echo "  自动换身份: AUTO_ROTATE=${AUTO_ROTATE}"
+echo "$(t "  监听:      ${BIND_DISPLAY}:${GW_PORT}    (改 ${GW_ENV})")"
+echo "$(t "  自动换身份: AUTO_ROTATE=${AUTO_ROTATE}")"
 echo ""
 echo "  Hermes / OpenAI SDK:"
 echo "    base_url: http://${VPS_IP}:${GW_PORT}/v1"
 echo "    api_key:  ${API_KEY}"
-echo "    model:    auto          # 也可写具体模型名"
+echo "$(t '    model:    auto          # 也可写具体模型名')"
 echo ""
-echo "  常用命令:"
+echo "$(t '  常用命令:')"
 echo "    systemctl status antseed-gateway"
 echo "    journalctl -u antseed-gateway -f"
 echo "    curl -s http://127.0.0.1:${GW_PORT}/health | python3 -m json.tool"
@@ -2640,10 +2961,10 @@ echo "    curl -s -H 'Authorization: Bearer ${API_KEY}' http://127.0.0.1:${GW_PO
 echo "    curl -s -H 'Authorization: Bearer ${API_KEY}' http://127.0.0.1:${GW_PORT}/v1/health/detail"
 echo ""
 if [ "$GW_BIND" = "127.0.0.1" ] || [ "$GW_BIND" = "localhost" ]; then
-    echo "  当前只监听本机。要从外面访问: 把 ${GW_ENV} 里 GATEWAY_BIND 改成 :: 或 0.0.0.0,"
-    echo "  并强烈建议在前面挂 TLS 反代(Caddy/Nginx),否则 API key 与 prompt 都是明文过网。"
+    echo "$(t "  当前只监听本机。要从外面访问: 把 ${GW_ENV} 里 GATEWAY_BIND 改成 :: 或 0.0.0.0,")"
+    echo "$(t '  并强烈建议在前面挂 TLS 反代(Caddy/Nginx),否则 API key 与 prompt 都是明文过网。')"
     echo ""
 fi
-echo "  升级:  bash install.sh upgrade"
-echo "  卸载:  bash install.sh uninstall [--purge]"
+echo "$(t '  升级:  bash install.sh upgrade')"
+echo "$(t '  卸载:  bash install.sh uninstall [--purge]')"
 echo "=================================================="
