@@ -517,16 +517,19 @@ menu_state() {
 }
 # 菜单读输入统一走真实终端:bash <(curl ...) 会把 stdin 顶成 /dev/fd/63,
 # 直接 read 会读到脚本自己的字节流(或者 EOF),菜单当场退出。
-menu_ask() {   # menu_ask <prompt> [default]  -> 打印用户输入
-    local _p="$1" _d="${2-}" _v=""
+# 注意:必须用「写入全局变量」的形态,不能 $(menu_ask ...) 取返回值。
+# 命令替换会开子 shell,fd 3(/dev/tty)在子 shell 里默认不可读,
+# 菜单就会卡在 read 上直到超时。所以统一用 menu_ask VAR "提示" [默认值]。
+menu_ask() {   # menu_ask <目标变量名> <提示> [默认值]
+    local _var="$1" _p="$2" _d="${3-}" _v=""
     printf '%s' "$_p" >&2
     if [ "${MENU_TTY:-0}" = "1" ]; then
-        IFS= read -r _v <&3 || _v="$_d"
+        IFS= read -r _v <&3 || _v=""
     else
-        IFS= read -r _v || _v="$_d"
+        IFS= read -r _v || _v=""
     fi
     [ -n "$_v" ] || _v="$_d"
-    printf '%s' "$_v"
+    printf -v "$_var" '%s' "$_v"
 }
 
 do_menu() {
@@ -550,11 +553,11 @@ do_menu() {
         echo "  7) 修改配置               (API key、端口、FREE_ONLY…)"
         echo "  0) 退出"
         echo "=================================================="
-        c="$(menu_ask "  选择 [0-7]: ")"
+        menu_ask c "  选择 [0-7]: "
         case "$c" in
             1)
                 _ms="$(menu_self)" || die "拿不到可重执行的脚本副本(离线?)。请在本地已下载的 install.sh 上跑菜单。"
-                key="$(menu_ask "  API Key(留空=沿用已有/自动生成): ")"
+                menu_ask key "  API Key(留空=沿用已有/自动生成): "
                 echo ""
                 if [ -n "$key" ]; then
                     exec env NO_MENU=1 INSTALL_URL="$SELF_URL" bash "$_ms" --key="$key"
@@ -569,7 +572,7 @@ do_menu() {
                 ;;
             3)
                 _ms="$(menu_self)" || die "拿不到可重执行的脚本副本(离线?)。请用: bash install.sh uninstall [--purge]"
-                a="$(menu_ask "  连 /etc/antseed 配置与节点身份一起删? [y/N] ")"
+                menu_ask a "  连 /etc/antseed 配置与节点身份一起删? [y/N] "
                 case "$a" in
                     [yY]*) NO_MENU=1 bash "$_ms" uninstall --purge || warn "卸载返回非零" ;;
                     *)     NO_MENU=1 bash "$_ms" uninstall || warn "卸载返回非零" ;;
@@ -582,7 +585,7 @@ do_menu() {
                 ;;
             5) do_status ;;
             6)
-                a="$(menu_ask "  1=最近 60 行  2=实时跟随  [1]: " 1)"
+                menu_ask a "  1=最近 60 行  2=实时跟随  [1]: " 1
                 case "$a" in
                     2) LOG_FOLLOW=1 do_logs ;;
                     *) do_logs ;;
