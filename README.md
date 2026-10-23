@@ -186,7 +186,6 @@ bash install.sh uninstall --purge  # 连配置和节点身份一起删
 
 ```bash
 vim gateway.py                   # 改网关
-python3 tests/test_gateway.py    # 59 项行为测试:假上游 + 真网关进程,不需要真 buyer
 bash tools/build-install.sh      # 重新生成 install.sh(会校验内嵌副本与源文件逐字节一致)
 bash install.sh --dry-run        # 看安装流程
 ```
@@ -201,8 +200,6 @@ bash install.sh --dry-run        # 看安装流程
 | `install.sh.tpl` → `install.sh` | 安装器本体与它的构建产物(自包含,内嵌 `gateway.py`) |
 | `upgrade.sh` | 只换网关程序 + 自检 + 失败回滚,不动 Node / CLI / 配置 / 节点身份 |
 | `tools/build-install.sh` | 生成 `install.sh` 并做正反向字节校验 |
-| `tests/` | 行为测试与 DSH 错误分类复刻 |
-| `安装说明.md` · `CHANGELOG.md` | 部署手册 · 逐版本改动与根因 |
 | `v1/` | v1 单文件安装器与第三方 patch,**仅存档**,新装请用根目录这版 |
 
 ## 排错

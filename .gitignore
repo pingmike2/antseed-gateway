@@ -4,3 +4,8 @@ node_modules/
 .env
 *.key
 *.pem
+
+# 仅本地保留,不上传仓库
+/tests/
+/CHANGELOG.md
+/安装说明.md
