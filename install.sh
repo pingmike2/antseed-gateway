@@ -551,6 +551,20 @@ menu_state() {
 # 注意:必须用「写入全局变量」的形态,不能 $(menu_ask ...) 取返回值。
 # 命令替换会开子 shell,fd 3(/dev/tty)在子 shell 里默认不可读,
 # 菜单就会卡在 read 上直到超时。所以统一用 menu_ask VAR "提示" [默认值]。
+menu_key() {   # menu_key <目标变量名> <提示>  —— 单键即选,不用回车
+    local _var="$1" _p="$2" _v=""
+    printf '%s' "$_p" >&2
+    if [ "${MENU_TTY:-0}" = "1" ]; then
+        IFS= read -rsn1 _v <&3 || _v=""
+        # 吞掉同一行的残余(用户习惯性敲的回车),否则会污染下一次整行输入
+        IFS= read -rt 0.05 _junk <&3 2>/dev/null || true
+    else
+        IFS= read -r _v || _v=""      # 非 tty(脚本喂输入)退回整行读
+    fi
+    printf '%s\n' "$_v" >&2
+    printf -v "$_var" '%s' "$_v"
+}
+
 menu_ask() {   # menu_ask <目标变量名> <提示> [默认值]
     local _var="$1" _p="$2" _d="${3-}" _v=""
     printf '%s' "$_p" >&2
@@ -584,7 +598,7 @@ do_menu() {
         echo "  7) 修改配置               (API key、端口、FREE_ONLY…)"
         echo "  0) 退出"
         echo "=================================================="
-        menu_ask c "  选择 [0-7]: "
+        menu_key c "  选择 [0-7] (单键即选): "
         case "$c" in
             1)
                 _ms="$(menu_self)" || die "拿不到可重执行的脚本副本(离线?)。请在本地已下载的 install.sh 上跑菜单。"
