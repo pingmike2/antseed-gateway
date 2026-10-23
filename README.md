@@ -1,189 +1,204 @@
-# Antseed Gateway
+# Antseed Gateway v2
 
-一键部署 Antseed P2P 推理市场 buyer proxy，暴露 OpenAI 兼容 API。
+把 Antseed P2P 网络包成一个 OpenAI / Anthropic 兼容的 HTTP 代理:探活、回退、拉黑、流式转发、免费模型过滤都在这一层做。
 
-## 特性
-
-- 一键安装：`apikey=your_key bash install.sh`
-- 自动安装 Node 24 + Antseed CLI
-- 免费模型优先路由（`preferFreePeers: true`）
-- systemd 服务管理
-- OpenAI 兼容 API（`/v1/chat/completions`、`/v1/models`）
-
-## 实测结果（2026-10-08）
-
-| 模型 | 状态 | 备注 |
-|------|------|------|
-| deepseek-v4-flash | ✅ | 正常返回 |
-| glm-5.3-flash | ✅ | 正常返回 |
-| minimax-m3 | ✅ | 正常返回 |
-| openai-gpt-oss-120b | ✅ | 正常返回 |
-| gemma-4-e4b | ✅ | 正常返回 |
-| llama-3.1-8b | ✅ | 正常返回 |
-| mistral-nemo | ✅ | 正常返回 |
-| glm-4.7-flash | ❌ | seller 要求 credits（非真免费） |
-| qwen3-235b-instruct | ❌ | peer 连接失败 |
-| nemotron-3-ultra-free | ❌ | peer 连接失败 |
-
-**7/10 免费模型可用**，无需 USDC 押金。
-
-## 快速开始
-
-> **适用环境**
-> - ✅ 有公网 IPv4 的 VPS
-> - ✅ 纯 IPv6 VPS,并套 WARP(已实测可用)
-> - ❌ NAT VPS(无公网端口映射,例如 Alpine/128MB 小机)不支持:buyer 常驻约 240MB 内存,且 Alpine 上官方 Node 24 不可用
-
-```bash
-# 不传 apikey 则自动生成；默认只返回免费模型
-bash <(wget -qO- https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
-
-# 或自定义 apikey
-apikey=your_key bash <(wget -qO- https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
-
-# 返回全部模型（含付费）
-FREE_ONLY=0 bash <(wget -qO- https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
+```
+客户端(Hermes/OpenAI SDK/curl)
+        │  http://<host>:8377/v1
+        ▼
+  antseed-gateway(本仓库,Python 标准库)
+        │  http://127.0.0.1:8378/v1
+        ▼
+  antseed buyer(P2P 客户端,官方 CLI)
 ```
 
-## 使用
-
-### 查看模型列表
+## 安装
 
 ```bash
-curl http://127.0.0.1:8377/v1/models
+# 有终端就进菜单:安装/升级/卸载/更新官方 CLI/状态/日志/改配置
+bash install.sh
+
+# 一条命令安装(会问都不问,key 不给就自动生成;非交互/CI 用这个)
+apikey='your-key' bash install.sh install
+
+# 先看它要干什么
+bash install.sh --dry-run
+
+# 从 URL 装
+bash <(curl -fsSL https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
 ```
 
-### 调用模型
+要求:Linux + systemd(root)。支持 Debian/Ubuntu、RHEL/Alma/Rocky/Fedora、Arch;Alpine 会被明确拒绝(官方 Node 24 要 glibc)。
 
-```bash
-curl http://127.0.0.1:8377/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "deepseek-v4-flash",
-    "messages": [{"role": "user", "content": "Hello"}]
-  }'
-```
+装完会打印 `base_url` / `api_key`,并做一次自检(`/health` + `/v1/models`)。
 
-### Hermes 配置
+## 客户端配置
 
-在 `~/.hermes/config.yaml` 添加：
+OpenAI 兼容(Hermes、openai-python、LobeChat、OneAPI 等):
 
 ```yaml
-model:
-  provider: antseed
-  default: antseed
-  base_url: "http://127.0.0.1:8377/v1"
-  api_mode: chat_completions
-
-providers:
-  antseed:
-    name: Antseed
-    api: http://127.0.0.1:8377/v1
-    api_key: your_api_key
-    transport: chat_completions
-    default_model: antseed
-    models:
-      antseed:
-        context_length: 200000
+base_url: http://<host>:8377/v1
+api_key:  sk-antseed-xxxx
+model:    auto              # auto / antseed / 具体模型名
 ```
 
-## 管理命令
+Anthropic 兼容(Claude Code 类客户端):
+
+```
+ANTHROPIC_BASE_URL=http://<host>:8377
+ANTHROPIC_API_KEY=sk-antseed-xxxx
+ANTHROPIC_MODEL=auto
+```
+
+`auto`(或留空)走网关自己挑的最佳模型,响应头 `X-Antseed-Model` 告诉你实际用了谁。
+
+## 接口
+
+| 路径 | 说明 |
+| --- | --- |
+| `POST /v1/chat/completions` | OpenAI 对话,支持 `stream: true` |
+| `POST /v1/messages` | Anthropic 消息,支持流式 |
+| `GET /v1/models` | 当前可路由模型(免费过滤已生效,`auto`/`antseed` 在最前) |
+| `GET /health` | 免鉴权存活探针,只报 ok/healthy/计数,不泄漏模型与身份 |
+| `GET /v1/health/detail` | 需鉴权:每个模型延迟、失败次数、黑名单、请求统计 |
+
+响应头:`X-Antseed-Model`(实际模型)、`X-Antseed-Attempt`(第几次尝试)、`X-Antseed-Fallback`(是否回退过)。
+
+`/v1/models` 里每个模型带 `x_*` 标注(不影响 OpenAI 客户端解析):
+
+| 字段 | 含义 |
+| --- | --- |
+| `x_healthy` | 最近一次探活通过且未在冷却 |
+| `x_latency_s` | EWMA 延迟 |
+| `x_routes_to` | `auto` 当前落在哪个模型 |
+| `x_cooldown_for_s` | 还在冷却时的剩余秒数 |
+| `x_last_error` | 上次失败原因(含 402 是额度还是押金) |
+| `x_free_peers` | **`$0 peer / 全部 peer`**,例如 `1/22` = 22 个对端里只有 1 个免费 |
+| `x_needs_deposit` | 真实请求撞到过 `insufficient_deposits`,这个模型大概率要充押金 |
+
+`x_free_peers` 是判断"名义免费 ≠ 这次能免费"的唯一依据:过滤规则是"存在 `$0` peer 就算免费",
+但 buyer 在全部 peer 里挑,`1/22` 的模型很容易被派到收费 peer。
+
+## 配置
+
+全部在 `/etc/antseed/gateway.env`(0600),改完 `systemctl restart antseed-gateway`。
+
+**重装是幂等的**:已经装过再跑 `bash install.sh` 时,只会更新你**显式传入**的项(`apikey=`/`--key=`、`FREE_ONLY=`、`--port=`、`GATEWAY_BIND=`),其余行(包括你手调的超时、拉黑时长)原样保留,节点身份也复用。要换身份才用 `--force-rotate`。
+
+### 路由
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `UPSTREAM` | `http://127.0.0.1:8378` | buyer 地址 |
+| `FREE_ONLY` | `1` | 只路由 `$0` 报价的 text 模型;点名付费模型直接 400 |
+| `FALLBACK_ORDER` | `deepseek-v4-flash,glm-5.3-flash,openai-gpt-oss-120b` | 同延迟档下的优先级 |
+| `AUTO_FALLBACK` | `1` | 失败自动换下一个候选 |
+| `FALLBACK_NAMED` | `0` | 点名具体模型失败后是否换别的模型(0 = 照实报错,与 v1 一致) |
+| `SOFT_COOLDOWN` | `180` | 402/429 这类"换 peer 也许就好"的失败冷却秒数 |
+| `DEPOSIT_COOLDOWN` | `60` | 402 里"押金不足"(`insufficient_deposits`)的冷却秒数,比上面更短:充值或换个 `$0` peer 立刻可用 |
+| `MAX_ATTEMPTS` | `3` | 单请求最多试几个候选 |
+
+### 探活与拉黑
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `PROBE_INTERVAL` | `300` | 后台探活间隔(秒),`0` 关闭 |
+| `PROBE_TIMEOUT` | `45` | 单次探测超时 |
+| `PROBE_WORKERS` | `4` | 并发探测数 |
+| `FAIL_THRESHOLD` | `2` | 连续失败几次拉黑 |
+| `BLACKLIST_SECONDS` | `900` | 拉黑时长,期间不再作为候选 |
+| `HEALTHY_TTL` | `PROBE_INTERVAL*3` | 健康状态过期时间 |
+
+候选排序:健康 → 延迟(EWMA)→ `FALLBACK_ORDER` → 名字。
+
+### 超时与限额
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `STREAM_IDLE_TIMEOUT` | `90` | 流式块之间最长空闲,超时断流并计数 |
+| `NONSTREAM_TIMEOUT` | `300` | 非流式整请求超时 |
+| `CLIENT_TIMEOUT` | `300` | 单连接总时长上限 |
+| `MAX_CONCURRENCY` | `64` | 同时在处理的请求数,超出 503 |
+| `MAX_BODY_MB` | `64` | 请求体上限,超出 413 |
+
+### 402 换身份
+
+```ini
+AUTO_ROTATE=0        # 默认关闭
+```
+
+`402` 有两种,处理不同:
+
+| 402 类型 | 判定 | 处理 |
+| --- | --- | --- |
+| 节点免费额度用尽 | body 无 `insufficient_deposits` | 踢出候选并回退;全都 402 时 `503 + Retry-After` |
+| **押金不足**(`insufficient_deposits` / `out of AntSeed credits`) | 对端收费、本机 `antseed buyer status` 押金为 0 | `DEPOSIT_COOLDOWN`(60s)短冷却 + `/v1/models` 标 `x_needs_deposit` + 回 **402 带可操作文案**(不是 `503 no healthy model`) |
+
+押金不足回的是 **`400` + `invalid_request_error` + `code: model_requires_deposit`**,不是 402:
+DSH 这类客户端会 `status === 402` 直接判成 QUOTA 并显示"当前请求的额度已用尽",
+还会用正则 `insufficient[_-](quota|balance|credits)` 二次判定 —— 所以状态码、`type`、`code`
+三处都不能带配额语义。想改回去用 `DEPOSIT_STATUS=402`,但那等于接受客户端那句误导文案。
+
+第二类**不是**"模型坏了",也不是今天的用量用完了。要让某个模型真正可用,只有两条路:
+`antseed buyer deposit <金额>` 充值,或改用 `$0` peer 多的免费模型(`auto` 默认就落在那上面)。
+
+`AUTO_ROTATE=1` 会额外触发 `antseed-rotate.service`(oneshot):换节点身份 → 重启 buyer → 等就绪 → 重试同一模型一次。
+
+**为什么默认关**:换身份重刷免费额度会踩平台限流/风控,轻则 buyer 长时间 429,重则身份被拉黑。这条是产品策略问题,不是技术问题 —— 想开就开,但知道代价。
+
+## 运维
 
 ```bash
-# 查看状态
-systemctl status antseed-gateway
-
-# 查看日志
+systemctl status antseed-gateway antseed-buyer
 journalctl -u antseed-gateway -f
+journalctl -u antseed-buyer -f
 
-# 重启
-systemctl restart antseed-gateway
-
-# 停止
-systemctl stop antseed-gateway
-
-# 一键卸载（停止服务、删除配置和 systemd unit）
-curl -fsSL https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh | bash -s uninstall
+curl -s http://127.0.0.1:8377/health | python3 -m json.tool
+curl -s -H "Authorization: Bearer <key>" http://127.0.0.1:8377/v1/health/detail | python3 -m json.tool
+curl -s -H "Authorization: Bearer <key>" http://127.0.0.1:8377/v1/models | python3 -m json.tool
 ```
 
-### 手动轮换节点身份（402 刷新额度）
+换 key / 改端口 / 调超时:改 `/etc/antseed/gateway.env` 后 `systemctl restart antseed-gateway`,不用重装。
 
-`402 out of AntSeed credits` 表示当前 buyer 身份的免费额度用尽。正常情况下网关检测到 402 会**自动轮换身份并重启 buyer**（无需重装）；如果心急想立即刷新，手动执行:
+换 API key(会提示同步客户端):
 
 ```bash
-# 立即轮换身份（生成新身份 → 重启 buyer → 等待就绪,约 15-20 秒）
-bash -x /usr/local/bin/antseed-rotate-identity.sh
-
-# 查看轮换记录（确认是否刷新）
-tail -5 /var/log/antseed-rotate.log
-
-# 查看当前身份
-grep ANTSEED_IDENTITY_HEX /etc/systemd/system/antseed-buyer.service
+bash install.sh --key=sk-antseed-新key
 ```
 
-说明:
-
-- 轮换只换 buyer 节点身份,API key、配置、模型列表全部保留,不需要重装。
-- 脚本自带防并发锁 `/tmp/antseed-rotate.lock`,锁超 300 秒自动失效,不会永久卡死。
-- 执行前先看 `rotate.log` 有没有刚刷新的记录,避免与自动轮换撞锁。
-
-## 免费模型
-
-当前可用的 $0 模型（需网络连通）：
-
-- `deepseek-v4-flash`
-- `glm-4.7-flash`
-- `glm-5.3-flash`
-- `MiniMax-M3`
-- `openai-gpt-oss-120b`
-- `qwen3-235b-instruct`
-- `nemotron-3-ultra-free`
-
-查看实时报价：
+换节点身份:
 
 ```bash
-curl -s https://network.antseed.com/stats | jq -r '
-  [.peers[].providers[].servicePricing // {} | to_entries[]
-   | select(.value.inputUsdPerMillion == 0 and .value.outputUsdPerMillion == 0)
-   | .key] | unique | .[]'
+systemctl start antseed-rotate.service      # 手动轮换,日志 /var/log/antseed-rotate.log
+bash install.sh --force-rotate             # 或重装时强制换(等价 FORCE_ROTATE=1)
 ```
 
-## 故障排查
-
-### 服务启动失败
+## 升级 / 卸载
 
 ```bash
-journalctl -u antseed-gateway -n 100
+bash install.sh upgrade          # 换网关程序 + unit,保留配置与身份
+bash upgrade.sh                  # 只换 gateway.py,自带备份 + /health 自检 + 失败回滚
+bash install.sh uninstall        # 停服务删程序,保留 /etc/antseed 与节点身份
+bash install.sh uninstall --purge  # 连配置和节点身份一起删
 ```
 
-### 模型调用 502
+## 改这个项目
 
 ```bash
-# 检查网络连通性
-curl -s http://127.0.0.1:8377/v1/models | python3 -c "import sys,json; m=json.load(sys.stdin)['data']; free=[x for x in m if any(p.get('inputUsdPerMillion',999)==0 and p.get('outputUsdPerMillion',999)==0 for p in x.get('peers',[]))]; print(f'Free: {len(free)} models'); [print(f'  - {x[\"id\"]}') for x in free[:20]]"
-
-# 检查日志
-journalctl -u antseed-gateway -n 50 | grep -i error
+vim gateway.py                   # 改网关
+bash tools/build-install.sh      # 重新生成 install.sh(会校验内嵌副本与源文件逐字节一致)
+bash install.sh --dry-run        # 看安装流程
 ```
 
-### Node 版本问题
+`install.sh` 是构建产物,别手改 —— 下次 build 就冲掉了。安装器里内嵌的 `gateway.py` 必须是**同一份代码**,否则"本地测的是 A、装上去的是 B",这正是 v1 最容易翻车的地方。
 
-```bash
-node -v  # 应该是 v24.x
-```
+## 排错
 
-## 系统要求
-
-- Linux x64/arm64
-- root 权限
-- 网络可访问 `network.antseed.com`
-
-## 免责声明
-
-本项目为非官方第三方项目,与 Antseed 及 Antseed Foundation 无关联,未经其认可或维护。免费模型由 Antseed P2P 网络上的独立节点提供,可用性、输出质量、延迟和隐私均无保证;请求内容可能被提供服务的节点看到,请勿发送敏感数据。部分模型可能报错(如 402 需充值、404/429/502)或产生费用。使用者须自行遵守 Antseed 条款、各上游模型提供方条款及所在地法律。因使用本软件(包括对外暴露 API 端口)造成的任何损失,作者不承担责任,风险自负。
-
-This is an unofficial, third-party project, not affiliated with or endorsed by Antseed or the Antseed Foundation. Free models are served by independent peers on the Antseed P2P network with no guarantee of availability, quality, latency or privacy; requests may be visible to the serving peer. Some models may return errors or charge fees. You are responsible for complying with the Antseed terms, each upstream provider's terms, and applicable laws. The author is not liable for any loss arising from use of this software, including exposing the API endpoint publicly. Use at your own risk.
-
-## License
-
-[MIT License](LICENSE) © 2026 [pingmike2](https://github.com/pingmike2)
+| 现象 | 排查 |
+| --- | --- |
+| `/v1/models` 只有 `auto`/`antseed` | buyer 没就绪或全网无免费节点:`curl 127.0.0.1:8378/v1/models`、`journalctl -u antseed-buyer -n 50` |
+| 全部 503 | `/v1/health/detail` 看是不是全被拉黑;等 `BLACKLIST_SECONDS` 或 `systemctl restart antseed-gateway` 清空内存态 |
+| 一直 401 | key 在 `gateway.env` 里被加了引号/空格;客户端发的是 `Authorization: Bearer` 或 `x-api-key` |
+| 流式像卡住 | `STREAM_IDLE_TIMEOUT` 太小,或客户端/Nginx 缓冲:`proxy_buffering off;` |
+| buyer 反复重启 | 看 `journalctl -u antseed-buyer`;OOM 就降 `MAX_CONCURRENCY`,或换大内存机型 |
+| 外网连不上 | `GATEWAY_BIND` 是不是还是 `127.0.0.1`;云厂商安全组是否放行端口 |
