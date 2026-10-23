@@ -336,7 +336,8 @@ do_update_cli() {
         case "$a" in [nN]*) log "已跳过,保持现状"; return 0 ;; esac
     fi
     log "npm install -g ${CLI_PKG}@${lat} ..."
-    run "$NPM_BIN" install -g "${CLI_PKG}@${lat}" --no-audit --no-fund
+    # shellcheck disable=SC2086  # ${NPM_ALLOW:-} 为空时要展开成 0 个参数
+    run "$NPM_BIN" install -g "${CLI_PKG}@${lat}" --no-audit --no-fund ${NPM_ALLOW:-}
     if [ "$DRY_RUN" = "1" ]; then
         log "would restart antseed-buyer"
         return 0
@@ -1107,13 +1108,24 @@ fi
 
 ANTSEED_BIN="$NODE_PREFIX/bin/antseed"
 
+# npm 11 起默认不执行依赖的 install/preinstall 脚本。@antseed/node(better-sqlite3 /
+# keytar / node-datachannel)靠这些脚本拉预编译产物或就地编译,不放行的话在缺少
+# 对应平台预编译包的机器(如 arm64)上装出来的 CLI 会缺原生模块。
+# 老版本 npm 不认识这个参数(会报 Unknown option),所以先探测再决定传不传。
+NPM_ALLOW=""
+if [ "$DRY_RUN" != "1" ] && "$NPM_BIN" install --help 2>/dev/null | grep -q -- '--allow-scripts'; then
+    NPM_ALLOW="--allow-scripts=@antseed/node,better-sqlite3,keytar,node-datachannel"
+    log "npm 支持 --allow-scripts,放行 4 个原生依赖的构建脚本"
+fi
+
 install_cli() {
     if [ -x "$ANTSEED_BIN" ] && [ "${FORCE_INSTALL:-0}" != "1" ]; then
         log "@antseed/cli 已装: $("$NODE_BIN" "$ANTSEED_BIN" --version 2>/dev/null || echo '?') (重装: FORCE_INSTALL=1)"
         return 0
     fi
     log "安装 @antseed/cli@${CLI_VERSION} ..."
-    run "$NPM_BIN" install -g "@antseed/cli@${CLI_VERSION}" --no-audit --no-fund
+    # shellcheck disable=SC2086  # NPM_ALLOW 为空时要展开成 0 个参数,不能加引号
+    run "$NPM_BIN" install -g "@antseed/cli@${CLI_VERSION}" --no-audit --no-fund $NPM_ALLOW
     if [ "$DRY_RUN" != "1" ] && [ ! -x "$ANTSEED_BIN" ]; then
         warn "CLI 未就绪,安装编译依赖后重试一次"
         case "$PM" in
@@ -1122,7 +1134,8 @@ install_cli() {
             pacman) run pacman -S --needed --noconfirm base-devel python ;;
             none) : ;;
         esac
-        run "$NPM_BIN" install -g "@antseed/cli@${CLI_VERSION}" --no-audit --no-fund
+        # shellcheck disable=SC2086
+        run "$NPM_BIN" install -g "@antseed/cli@${CLI_VERSION}" --no-audit --no-fund $NPM_ALLOW
     fi
     [ "$DRY_RUN" = "1" ] || [ -x "$ANTSEED_BIN" ] || die "CLI 安装失败:$ANTSEED_BIN 不存在"
 }
