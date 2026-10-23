@@ -205,11 +205,13 @@ menu_self() {
     # 而菜单还要拿这个副本去执行子动作(卸载/升级),必须先于清理存在。
     SELF_CACHE="/tmp/.antseed-self-$$.sh"
     rm -f "$SELF_CACHE" 2>/dev/null
+    printf '  准备执行副本(最多 20s)...' >&2
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$SELF_URL" -o "$SELF_CACHE" 2>/dev/null || true
+        curl -fsSL --max-time 20 --connect-timeout 8 "$SELF_URL" -o "$SELF_CACHE" 2>/dev/null || true
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO "$SELF_CACHE" "$SELF_URL" 2>/dev/null || true
+        wget -q --timeout=20 --tries=1 -O "$SELF_CACHE" "$SELF_URL" 2>/dev/null || true
     fi
+    printf '\n' >&2
     if [ -s "$SELF_CACHE" ] && bash -n "$SELF_CACHE" 2>/dev/null; then
         chmod 0700 "$SELF_CACHE"
         trap 'rm -f "$SELF_CACHE"' EXIT
