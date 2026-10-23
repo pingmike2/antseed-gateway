@@ -201,7 +201,10 @@ menu_self() {
         printf '%s' "$SELF_CACHE"
         return 0
     fi
-    SELF_CACHE="${TMPDIR_INSTALL:-/tmp}/.antseed-self-$$.sh"
+    # 注意:不能放 TMPDIR_INSTALL —— 那个目录会在退出时被 trap 整个删掉,
+    # 而菜单还要拿这个副本去执行子动作(卸载/升级),必须先于清理存在。
+    SELF_CACHE="/tmp/.antseed-self-$$.sh"
+    rm -f "$SELF_CACHE" 2>/dev/null
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL "$SELF_URL" -o "$SELF_CACHE" 2>/dev/null || true
     elif command -v wget >/dev/null 2>&1; then
@@ -670,7 +673,12 @@ case "$FALLBACK_ORDER" in
 esac
 
 TMPDIR_INSTALL="$(mktemp -d)"
-cleanup() { rm -rf "$TMPDIR_INSTALL"; }
+cleanup() {
+    rm -rf "$TMPDIR_INSTALL"
+    # 菜单从 URL 现取的可执行副本(在 /tmp,不在 TMPDIR_INSTALL 里)
+    [ -n "${SELF_CACHE:-}" ] && rm -f "$SELF_CACHE" 2>/dev/null
+    return 0
+}
 trap cleanup EXIT
 
 # ---------------- 环境检查 ----------------
