@@ -175,12 +175,23 @@ Each action ends at `press Enter to return to the menu...`; Enter goes back, `Ct
 
 **Non-interactive environments** (CI, no tty) skip the menu, install directly, and tell you: use `bash install.sh menu` for the menu.
 
-### Shortcuts
+### Interaction rules (consistent everywhere)
 
-- Selecting an item: **a single key**, no Enter
-- `q` / `Q` / `0` / bare Enter: quit
-- Sub-prompts (API key, port, …) are still whole-line input, confirmed with Enter
+Only two kinds of input exist in the menu:
+
+- **Choices and toggles**: a single key, applied immediately, no Enter
+  - the main menu, `0-7` in edit config, `FREE_ONLY [0/1]`, `FALLBACK_NAMED [0/1]`, `AUTO_ROTATE [0/1]`, logs `1/2`, the uninstall `[y/N]`
+  - these prompts say "single key"
+- **Typed values**: confirmed with Enter
+  - API key, bind address, port, probe interval, catalog cache
+  - these prompts say "Enter to confirm"
+
+Other conventions:
+
+- Every action ends at `press any key to return to the menu...` — **any key** returns, no Enter
+- In the main menu, `0` / `q` / bare Enter quits
 - Live log following exits with `Ctrl-C`
+- Fast typing never loses a key: an extra key read is pushed back for the next prompt
 
 ---
 

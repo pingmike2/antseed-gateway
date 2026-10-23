@@ -196,6 +196,16 @@ declare -A _I18N_STATIC=(
     ["  连 /etc/antseed 配置与节点身份一起删? [y/N] "]="  also delete /etc/antseed config and node identity? [y/N] "
     ["  1=最近 60 行  2=实时跟随  [1]: "]="  1=last 60 lines  2=follow live  [1]: "
     ["  快捷入口: antseed-gw   (直接进菜单;antseed-gw status / upgrade / logs)"]="  quick command: antseed-gw   (opens the menu; antseed-gw status / upgrade / logs)"
+    ["  提示: 选择项单键即选;只有要打字的地方才按回车。"]="  note: choices are a single keypress; only typed values need Enter."
+    ["  新 API Key(回车确认,留空不改): "]="  new API Key (Enter to confirm, blank = unchanged): "
+    ["  FREE_ONLY [0/1](单键,回车不改): "]="  FREE_ONLY [0/1] (single key, Enter = unchanged): "
+    ["  监听地址(:: / 0.0.0.0 / 127.0.0.1;回车确认): "]="  bind address (:: / 0.0.0.0 / 127.0.0.1; Enter to confirm): "
+    ["  端口(回车确认): "]="  port (Enter to confirm): "
+    ["  FALLBACK_NAMED [0/1](单键,回车不改): "]="  FALLBACK_NAMED [0/1] (single key, Enter = unchanged): "
+    ["  AUTO_ROTATE [0/1](单键,回车不改): "]="  AUTO_ROTATE [0/1] (single key, Enter = unchanged): "
+    ["  探活周期秒(建议 120-600;回车确认): "]="  probe interval in seconds (suggest 120-600; Enter to confirm): "
+    ["  目录缓存秒(建议 30-300;回车确认): "]="  catalog cache seconds (suggest 30-300; Enter to confirm): "
+    ["  按任意键返回菜单..."]="  press any key to return to the menu..."
 )
 _I18N_RE=(
     'would run: (.+?)'
@@ -484,7 +494,10 @@ env_set() {
 }
 read_env() {
     [ -f "$2" ] || return 0
-    sed -n "s/^${1}=//p" "$2" 2>/dev/null | head -1 || true
+    # 配置文件里是 `KEY=值   # 注释`,取值时要把行尾注释去掉,
+    # 否则菜单会显示成 "FALLBACK_NAMED 0   # 点名模型失败时…"。
+    sed -n "s/^${1}=//p" "$2" 2>/dev/null | head -1 \
+        | sed 's/[[:space:]]\{1,\}#.*$//' | sed 's/[[:space:]]*$//' || true
 }
 
 # 脚本自身路径:菜单要靠它 re-exec 自己执行子动作
@@ -524,6 +537,39 @@ if [ "$SELF_IS_PIPE" = "0" ] && [ -n "$_self_src" ] && [ -r "$_self_src" ] && [ 
     unset _sp_dir
 fi
 unset _self_src
+
+# 排空脚本管道,让 curl/wget 正常写完退出。
+# 必须在**每个 exec 之前**调用:exec 会替换进程,EXIT trap 不会执行,
+# 残留的管道读端被新进程继承却没人读,curl 立刻 EPIPE:
+#   curl: (23) Failure writing output to destination, passed 16348 returned 8192
+drain_self_pipe() {
+    [ -n "${SELF_PIPE_FD:-}" ] || return 0
+    # 同步读完:管道里剩的是安装器剩下的几十 KB,毫秒级;慢链路最多等 10s。
+    # 后台排空在 exec 之后就没人等了,子进程退出瞬间照样 EPIPE。
+    timeout 10 cat <&9 >/dev/null 2>&1 || true
+    eval "exec 9<&-" 2>/dev/null
+    SELF_PIPE_FD=""
+    return 0
+}
+
+# cleanup 必须尽早装上:--help、菜单 exec、die 都在脚本前 1/3 就退出,
+# 等后面再 trap 就漏掉了,管道读端没人读,curl 拿到 EPIPE:
+#   curl: (23) Failure writing output to destination, passed 16348 returned 8192
+cleanup() {
+    drain_self_pipe
+    # 只删自己 mktemp 出来的目录:默认值 /tmp 是系统目录,早退路径上
+    # trap 比 mktemp 先装,照删会把整台机器的 /tmp 清空。
+    if [ "${TMPDIR_CREATED:-0}" = "1" ] && [ -n "${TMPDIR_INSTALL:-}" ]; then
+        case "$TMPDIR_INSTALL" in
+            /|/tmp|/tmp/) : ;;
+            *) rm -rf "$TMPDIR_INSTALL" ;;
+        esac
+    fi
+    # 菜单从 URL 现取的可执行副本(在 /tmp,不在 TMPDIR_INSTALL 里)
+    [ -n "${SELF_CACHE:-}" ] && rm -f "$SELF_CACHE" 2>/dev/null
+    return 0
+}
+trap cleanup EXIT
 
 # menu_self: 给菜单拿一个"能被重新 bash 执行"的脚本路径
 #   1) 本来就是文件方式运行 -> 用它自己
@@ -572,7 +618,7 @@ install_launcher() {
     [ "$DRY_RUN" = "1" ] && { log "would install launcher: $GW_LAUNCHER"; return 0; }
     local src
     mkdir -p "$(dirname "$GW_CACHE")" 2>/dev/null || true
-    src="$(self_copy 2>/dev/null || true)"
+    src="$(menu_self 2>/dev/null || true)"
     if [ -n "$src" ] && [ -s "$src" ] && [ "$src" != "$GW_CACHE" ]; then
         cp -f "$src" "$GW_CACHE" 2>/dev/null && chmod 0755 "$GW_CACHE" 2>/dev/null || true
     fi
@@ -857,6 +903,7 @@ do_logs() {
     local n="${LOG_LINES:-60}"
     if [ "$LOG_FOLLOW" = "1" ]; then
         log "实时日志(Ctrl-C 退出)..."
+        drain_self_pipe
         exec journalctl -u antseed-gateway -u antseed-buyer -n "$n" -f --no-pager
     fi
     journalctl -u antseed-gateway -u antseed-buyer -n "$n" --no-pager
@@ -879,24 +926,31 @@ do_config() {
         printf "$(t '  6) AUTO_ROTATE    %s      (1=402 时换节点身份)\n')" "$(read_env AUTO_ROTATE "$GW_ENV")"
         printf "$(t '  7) 探活周期       %ss  / 目录缓存 %ss\n')" "$(read_env PROBE_INTERVAL "$GW_ENV")" "$(read_env MODELS_TTL "$GW_ENV")"
         echo "$(t '  0) 返回')"
-        local c; read -r -p "  选择 [0-7]: " c || return 0
+        echo "$(t '  提示: 选择项单键即选;只有要打字的地方才按回车。')"
+        local c; menu_key c "$(t '  选择 [0-7]: ')"
         case "$c" in
-            1) read -r -p "  新 API Key(回车不改): " v || true
+            1) menu_ask v "$(t '  新 API Key(回车确认,留空不改): ')"
                [ -n "$v" ] && { env_set "$GW_ENV" ANTSEED_API_KEY "$v"; log "已更新 API Key"; } ;;
-            2) read -r -p "  FREE_ONLY [0/1](回车不改): " v || true
+            2) menu_key v "$(t '  FREE_ONLY [0/1](单键,回车不改): ')"
                case "$v" in 0|1) env_set "$GW_ENV" FREE_ONLY "$v"; log "已设为 $v" ;; "") ;; *) warn "只接受 0 或 1" ;; esac ;;
-            3) read -r -p "  监听地址(:: / 0.0.0.0 / 127.0.0.1): " v || true
+            3) menu_ask v "$(t '  监听地址(:: / 0.0.0.0 / 127.0.0.1;回车确认): ')"
                [ -n "$v" ] && { env_set "$GW_ENV" GATEWAY_BIND "$v"; log "已设为 $v"; } ;;
-            4) read -r -p "  端口: " v || true
-               case "$v" in ''|*[!0-9]*) warn "只接受数字" ;; *) env_set "$GW_ENV" GATEWAY_PORT "$v"; log "已设为 $v" ;; esac ;;
-            5) read -r -p "  FALLBACK_NAMED [0/1]: " v || true
+            4) menu_ask v "$(t '  端口(回车确认): ')"
+               case "$v" in '' ) ;;
+                   *[!0-9]*) warn "只接受数字" ;;
+                   *) env_set "$GW_ENV" GATEWAY_PORT "$v"; log "已设为 $v" ;; esac ;;
+            5) menu_key v "$(t '  FALLBACK_NAMED [0/1](单键,回车不改): ')"
                case "$v" in 0|1) env_set "$GW_ENV" FALLBACK_NAMED "$v"; log "已设为 $v" ;; "") ;; *) warn "只接受 0 或 1" ;; esac ;;
-            6) read -r -p "  AUTO_ROTATE [0/1]: " v || true
+            6) menu_key v "$(t '  AUTO_ROTATE [0/1](单键,回车不改): ')"
                case "$v" in 0|1) env_set "$GW_ENV" AUTO_ROTATE "$v"; log "已设为 $v" ;; "") ;; *) warn "只接受 0 或 1" ;; esac ;;
-            7) read -r -p "  探活周期秒(建议 120-600): " v || true
-               case "$v" in ''|*[!0-9]*) warn "只接受数字" ;; *) env_set "$GW_ENV" PROBE_INTERVAL "$v"; log "已设为 $v" ;; esac
-               read -r -p "  目录缓存秒(建议 30-300): " v || true
-               case "$v" in ''|*[!0-9]*) ;; *) env_set "$GW_ENV" MODELS_TTL "$v"; log "已设为 $v" ;; esac ;;
+            7) menu_ask v "$(t '  探活周期秒(建议 120-600;回车确认): ')"
+               case "$v" in '' ) ;;
+                   *[!0-9]*) warn "只接受数字" ;;
+                   *) env_set "$GW_ENV" PROBE_INTERVAL "$v"; log "已设为 $v" ;; esac
+               menu_ask v "$(t '  目录缓存秒(建议 30-300;回车确认): ')"
+               case "$v" in '' ) ;;
+                   *[!0-9]*) ;;
+                   *) env_set "$GW_ENV" MODELS_TTL "$v"; log "已设为 $v" ;; esac ;;
             0|"") return 0 ;;
             *) warn "无效选择" ;;
         esac
@@ -915,17 +969,67 @@ menu_state() {
 # 注意:必须用「写入全局变量」的形态,不能 $(menu_ask ...) 取返回值。
 # 命令替换会开子 shell,fd 3(/dev/tty)在子 shell 里默认不可读,
 # 菜单就会卡在 read 上直到超时。所以统一用 menu_ask VAR "提示" [默认值]。
+# 菜单能不能用单键,取决于有没有真实终端。判定只看 /dev/tty:
+# bash <(curl ...) 把 fd 0 换成管道,[ -t 0 ] 是假,但终端仍挂在 /dev/tty。
+# 显式 `bash install.sh menu` / antseed-gw 走的也是这条路 —— 以前只在
+# 无参数分支里探测,MENU_TTY 没设,结果每次选择都要按回车,和别处不一致。
+menu_tty_init() {
+    MENU_TTY=0
+    if { : </dev/tty; } 2>/dev/null && { : >/dev/tty; } 2>/dev/null; then
+        # 这里**不能**带 2>/dev/null:exec 的重定向是永久的,
+        # 会把整个脚本的 stderr 接到 /dev/null,菜单提示和 warn 全消失。
+        if exec 3</dev/tty 4>/dev/tty; then MENU_TTY=1; fi
+    fi
+    [ "$MENU_TTY" = "1" ]
+}
+
+_KEY_PENDING=""      # 单键读太快时被吞掉的下一键,回填给下一次,免得丢键
 menu_key() {   # menu_key <目标变量名> <提示>  —— 单键即选,不用回车
-    local _var="$1" _p="$2" _v=""
+    local _var="$1" _p="$2" _v="" _junk=""
     printf '%s' "$_p" >&2
     if [ "${MENU_TTY:-0}" = "1" ]; then
-        IFS= read -rsn1 _v <&3 || _v=""
-        # 吞掉同一行的残余(用户习惯性敲的回车),否则会污染下一次整行输入
-        IFS= read -rt 0.05 _junk <&3 2>/dev/null || true
+        if [ -n "$_KEY_PENDING" ]; then
+            _v="$_KEY_PENDING"; _KEY_PENDING=""
+        else
+            IFS= read -rsn1 _v <&3 || _v=""
+            # 吞掉同一行的残余(用户习惯性敲的回车),否则会污染下一次整行输入;
+            # 但如果吞到的是另一个真实按键(手快/脚本喂输入),回填,不能丢。
+            IFS= read -rt 0.05 _junk <&3 2>/dev/null || _junk=""
+            case "$_junk" in
+                ""|$'\r'|$'\n') ;;
+                *) _KEY_PENDING="$_junk" ;;
+            esac
+        fi
     else
         IFS= read -r _v || _v=""      # 非 tty(脚本喂输入)退回整行读
     fi
     printf '%s\n' "$_v" >&2
+    printf -v "$_var" '%s' "$_v"
+}
+
+menu_confirm() {   # menu_confirm <目标变量名> <提示> [默认 y|n] —— 单键 y/n,不用回车
+    local _var="$1" _p="$2" _d="${3:-n}" _v=""
+    printf '%s' "$_p" >&2
+    if [ "${MENU_TTY:-0}" = "1" ]; then
+        if [ -n "$_KEY_PENDING" ]; then
+            _v="$_KEY_PENDING"; _KEY_PENDING=""
+        else
+            IFS= read -rsn1 _v <&3 || _v=""
+            IFS= read -rt 0.05 _junk <&3 2>/dev/null || _junk=""
+            case "$_junk" in
+                ""|$'\r'|$'\n') ;;
+                *) _KEY_PENDING="$_junk" ;;
+            esac
+        fi
+    else
+        IFS= read -r _v || _v=""
+    fi
+    printf '%s\n' "$_v" >&2
+    [ -n "$_v" ] || _v="$_d"
+    case "$_v" in
+        y|Y|yes|YES|是) _v=1 ;;
+        *)              _v=0 ;;
+    esac
     printf -v "$_var" '%s' "$_v"
 }
 
@@ -969,6 +1073,7 @@ do_menu() {
                 menu_ask key "$(t '  API Key(留空=沿用已有/自动生成): ')"
                 echo ""
                 if [ -n "$key" ]; then
+                    drain_self_pipe
                     exec env NO_MENU=1 INSTALL_URL="$SELF_URL" bash "$_ms" --key="$key"
                 else
                     exec env NO_MENU=1 INSTALL_URL="$SELF_URL" bash "$_ms"
@@ -981,7 +1086,7 @@ do_menu() {
                 ;;
             3)
                 _ms="$(menu_self)" || die "拿不到可重执行的脚本副本(离线?)。请用: bash install.sh uninstall [--purge]"
-                menu_ask a "$(t '  连 /etc/antseed 配置与节点身份一起删? [y/N] ')"
+                menu_confirm a "$(t '  连 /etc/antseed 配置与节点身份一起删? [y/N] ')"
                 case "$a" in
                     [yY]*) NO_MENU=1 bash "$_ms" uninstall --purge || warn "卸载返回非零" ;;
                     *)     NO_MENU=1 bash "$_ms" uninstall || warn "卸载返回非零" ;;
@@ -994,7 +1099,7 @@ do_menu() {
                 ;;
             5) do_status ;;
             6)
-                menu_ask a "$(t '  1=最近 60 行  2=实时跟随  [1]: ')" 1
+                menu_key a "$(t '  1=最近 60 行  2=实时跟随  [1]: ')"
                 case "$a" in
                     2) LOG_FOLLOW=1 do_logs ;;
                     *) do_logs ;;
@@ -1004,8 +1109,10 @@ do_menu() {
             0|q|Q|"") log "退出"; return 0 ;;
             *) warn "无效选择: $c" ;;
         esac
-        printf "$(t '\n  按回车返回菜单...')" >&2
-        if [ "${MENU_TTY:-0}" = "1" ]; then IFS= read -r _ <&3 || return 0; else IFS= read -r _ || return 0; fi
+        # 走 menu_key:它会先消费 _KEY_PENDING,否则上一轮单键读顺手吞下的
+        # 那个按键就永远拿不到了,这里会一直卡住。
+        echo "" >&2
+        menu_key _any "$(t '  按任意键返回菜单...')"
     done
 }
 
@@ -1089,18 +1196,7 @@ case "$FALLBACK_ORDER" in
 esac
 
 TMPDIR_INSTALL="$(mktemp -d)"
-cleanup() {
-    # 先把脚本管道的剩余内容读空,curl/wget 就不会因 EPIPE 报错(见 SELF_PIPE_FD)
-    if [ -n "${SELF_PIPE_FD:-}" ]; then
-        ( timeout 3 cat <&9 >/dev/null 2>&1 & ) 2>/dev/null
-        eval "exec 9<&-" 2>/dev/null
-    fi
-    rm -rf "$TMPDIR_INSTALL"
-    # 菜单从 URL 现取的可执行副本(在 /tmp,不在 TMPDIR_INSTALL 里)
-    [ -n "${SELF_CACHE:-}" ] && rm -f "$SELF_CACHE" 2>/dev/null
-    return 0
-}
-trap cleanup EXIT
+TMPDIR_CREATED=1
 
 # ---------------- 环境检查 ----------------
 if ! { command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; }; then
@@ -1147,14 +1243,8 @@ log "Python: $("$PYBIN" -V 2>&1) ($PYBIN)"
 if [ "$#" -eq 0 ] && [ "$ACTION" = "install" ] && [ "${NO_MENU:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
     MENU_OK=0
     # 首选 /dev/tty:bash <(curl ...) 把 fd 0 换成了管道,终端仍挂在 /dev/tty
-    if { : </dev/tty; } 2>/dev/null && { : >/dev/tty; } 2>/dev/null; then
-        # 注意:这里**不能**带 2>/dev/null —— exec 的重定向是永久的,
-        # 会把整个脚本的 stderr 接到 /dev/null,菜单提示("选择 [0-7]: ")
-        # 和后面所有 warn/报错全都消失。可用性上面已经探测过了。
-        if exec 3</dev/tty 4>/dev/tty; then
-            MENU_TTY=1
-            MENU_OK=1
-        fi
+    if menu_tty_init; then
+        MENU_OK=1
     fi
     # 退路:stdin 本身就是终端(bash install.sh / ./install.sh)
     if [ "$MENU_OK" = "0" ] && [ -t 0 ]; then
@@ -1169,6 +1259,7 @@ if [ "$#" -eq 0 ] && [ "$ACTION" = "install" ] && [ "${NO_MENU:-0}" != "1" ] && 
 fi
 case "$ACTION" in
     menu)
+        menu_tty_init || true
         do_menu
         exit 0 ;;
     update-cli)
