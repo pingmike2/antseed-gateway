@@ -1,5 +1,7 @@
 # Antseed Gateway v2
 
+> English: [README.en.md](./README.en.md) · 安装说明: [安装说明.md](./安装说明.md)
+
 把 Antseed P2P 网络包成一个 OpenAI / Anthropic 兼容的 HTTP 代理:探活、回退、拉黑、流式转发、免费模型过滤都在这一层做。
 
 ```
@@ -26,6 +28,9 @@ bash install.sh --dry-run
 
 # 从 URL 装
 bash <(curl -fsSL https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh)
+
+# 英文输出(默认中文)
+bash install.sh --lang=en
 ```
 
 要求:Linux + systemd(root)。支持 Debian/Ubuntu、RHEL/Alma/Rocky/Fedora、Arch;Alpine 会被明确拒绝(官方 Node 24 要 glibc)。
