@@ -228,7 +228,9 @@ menu_self() {
     printf '\n' >&2
     if [ -s "$SELF_CACHE" ] && bash -n "$SELF_CACHE" 2>/dev/null; then
         chmod 0700 "$SELF_CACHE"
-        trap 'rm -f "$SELF_CACHE"' EXIT
+        # 这里**不能**再 trap ... EXIT:那会把 cleanup 顶掉,退出时既漏删临时目录,
+        # 也漏了排空脚本管道(于是 `bash <(curl ...)` 早退就冒出 curl: (23))。
+        # SELF_CACHE 的回收已经在 cleanup 里统一做了。
         printf '%s' "$SELF_CACHE"
         return 0
     fi
