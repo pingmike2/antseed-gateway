@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-check:
+    name: 构建产物与源同步
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install.sh 与 install.sh.tpl+gateway.py 逐字节一致
+        run: bash tools/build-install.sh --check
+      - name: install.sh 语法
+        run: bash -n install.sh
+
+  test:
+    name: 行为测试 (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: 不需要第三方依赖,确认 gateway 只 import 标准库
+        run: python -c "import ast,sys; t=ast.parse(open('gateway.py',encoding='utf-8').read()); print('AST OK')"
+      - name: 跑行为测试
+        run: python tests/test_gateway.py
+
+  dry-run:
+    name: 安装流程干跑
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 干跑(不写系统,只打印流程)
+        run: bash install.sh --dry-run
+
+  install:
+    name: 真装 + 自检 + 卸载 (Ubuntu)
+    runs-on: ubuntu-latest
+    needs: [build-check, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 预置依赖
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq curl ca-certificates
+
+      - name: 一键安装(显式 key,跳过菜单)
+        run: |
+          set -o pipefail
+          sudo apikey=sk-antseed-ci-testkey-0001 \
+               GATEWAY_PORT=8377 \
+               CLI_VERSION=latest \
+               bash install.sh 2>&1 | tee /tmp/install.log
+
+      - name: 安装结果断言
+        run: |
+          set -e
+          echo "--- 从安装日志里取真实的 key 断言 ---"
+          grep -q "antseed-gateway" /tmp/install.log && echo "OK 安装器有输出"
+          test -f /usr/local/bin/antseed-gateway.py && echo "OK 网关程序已落地"
+          test -f /etc/systemd/system/antseed-gateway.service && echo "OK systemd unit 已生成"
+          test -f /etc/antseed/gateway.env && echo "OK 配置已生成"
+          systemctl is-enabled antseed-gateway && echo "OK 服务已 enable"
+
+      - name: 服务起来了吗
+        run: |
+          set -e
+          sudo systemctl start antseed-gateway || true
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8377/health >/tmp/health.json 2>/dev/null; then
+              echo "OK /health 在 ${i}s 内应答"; break
+            fi
+            sleep 1
+          done
+          cat /tmp/health.json || { echo "::error::/health 始终无应答"; sudo journalctl -u antseed-gateway -n 60 --no-pager; exit 1; }
+          python3 -c "import json;d=json.load(open('/tmp/health.json'));print('health payload:',json.dumps(d,ensure_ascii=False)[:300])"
+
+      - name: 鉴权生效(无 key 必须 401)
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8377/v1/models)
+          echo "无 key 访问 /v1/models -> $code"
+          test "$code" = "401" || { echo "::error::期望 401,实际 $code"; exit 1; }
+
+      - name: 带 key 访问 /v1/models
+        run: |
+          KEY=$(sudo sed -n 's/^ANTSEED_API_KEY=//p' /etc/antseed/gateway.env | head -1 | tr -d '"'"'"' \r')
+          test -n "$KEY" || { echo "::error::配置里没找到 key"; exit 1; }
+          code=$(curl -s -o /tmp/models.json -w '%{http_code}' --max-time 30 \
+                 -H "Authorization: Bearer $KEY" http://127.0.0.1:8377/v1/models)
+          echo "带 key -> $code"
+          cat /tmp/models.json | head -c 500; echo
+          test "$code" = "200" || { echo "::error::期望 200,实际 $code"; exit 1; }
+
+      - name: 菜单 0 = 状态与自检
+        run: printf '0\n' | sudo bash install.sh || true
+
+      - name: 卸载(保留配置)
+        run: |
+          set -o pipefail
+          printf '4\n\n' | sudo bash install.sh 2>&1 | tail -30 || true
+          sudo bash install.sh uninstall 2>&1 | tail -20
+          test ! -f /usr/local/bin/antseed-gateway.py && echo "OK 网关程序已删"
+          test -f /etc/antseed/gateway.env && echo "OK 配置按约定保留"
+
+      - name: 失败时抓日志
+        if: failure()
+        run: |
+          echo "=== install.log (tail 120) ==="
+          tail -120 /tmp/install.log 2>/dev/null || echo "no install.log"
+          echo "=== systemctl status ==="
+          sudo systemctl status antseed-gateway --no-pager -l 2>&1 | head -40 || true
+          echo "=== journal ==="
+          sudo journalctl -u antseed-gateway -n 100 --no-pager 2>&1 || true

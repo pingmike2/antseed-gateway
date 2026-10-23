@@ -168,12 +168,57 @@ read_env() {
 }
 
 # 脚本自身路径:菜单要靠它 re-exec 自己执行子动作
+#
+# 关键陷阱:一键安装是 `bash <(curl -fsSL .../install.sh)`,此时 $0 是 /dev/fd/63。
+# 那个 fd 是**一次性管道**,而且和正在读取执行本脚本的 bash 共用同一个 file
+# offset —— 谁再读它一次,外层 bash 的续读就会从文件中间开始,函数定义全丢,
+# 随后报出一屏 `log: command not found`(行号还是文件真实行号)。
+# 所以管道场景下**绝不 cat / 读 $0**,只标记"自己是管道",菜单要重执行时
+# 再从固定 URL 现取一份干净的副本。
 SELF_PATH=""
-if [ -r "${BASH_SOURCE[0]:-$0}" ] && [ ! -c "${BASH_SOURCE[0]:-$0}" ]; then
-    _sp_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || _sp_dir=""
-    [ -n "$_sp_dir" ] && SELF_PATH="$_sp_dir/$(basename "${BASH_SOURCE[0]:-$0}")"
+SELF_URL="${INSTALL_URL:-https://raw.githubusercontent.com/pingmike2/antseed-gateway/main/install.sh}"
+SELF_IS_PIPE=0
+_self_src="${BASH_SOURCE[0]:-$0}"
+case "$_self_src" in
+    /dev/fd/*|/proc/*/fd/*|/dev/stdin|-) SELF_IS_PIPE=1 ;;
+esac
+if [ "$SELF_IS_PIPE" = "0" ] && [ -n "$_self_src" ] && [ -r "$_self_src" ] && [ ! -c "$_self_src" ]; then
+    _sp_dir="$(cd "$(dirname "$_self_src")" 2>/dev/null && pwd)" || _sp_dir=""
+    [ -n "$_sp_dir" ] && SELF_PATH="$_sp_dir/$(basename "$_self_src")"
     unset _sp_dir
 fi
+unset _self_src
+
+# menu_self: 给菜单拿一个"能被重新 bash 执行"的脚本路径
+#   1) 本来就是文件方式运行 -> 用它自己
+#   2) 管道方式(<(curl ...) / curl | bash) -> 从 SELF_URL 现取一份到临时文件
+menu_self() {
+    if [ -n "$SELF_PATH" ] && [ -s "$SELF_PATH" ]; then
+        printf '%s' "$SELF_PATH"
+        return 0
+    fi
+    if [ -n "${SELF_CACHE:-}" ] && [ -s "$SELF_CACHE" ]; then
+        printf '%s' "$SELF_CACHE"
+        return 0
+    fi
+    SELF_CACHE="${TMPDIR_INSTALL:-/tmp}/.antseed-self-$$.sh"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$SELF_URL" -o "$SELF_CACHE" 2>/dev/null || true
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$SELF_CACHE" "$SELF_URL" 2>/dev/null || true
+    fi
+    if [ -s "$SELF_CACHE" ] && bash -n "$SELF_CACHE" 2>/dev/null; then
+        chmod 0700 "$SELF_CACHE"
+        trap 'rm -f "$SELF_CACHE"' EXIT
+        printf '%s' "$SELF_CACHE"
+        return 0
+    fi
+    rm -f "$SELF_CACHE" 2>/dev/null
+    SELF_CACHE=""
+    return 1
+}
+
+TMPDIR_INSTALL="${TMPDIR_INSTALL:-/tmp}"
 
 # node / npm / antseed 三件套:独立运行时也要能找到
 toolchain_probe() {
@@ -491,32 +536,32 @@ do_menu() {
         read -r -p "  选择 [0-7]: " c || return 0
         case "$c" in
             1)
-                [ -n "$SELF_PATH" ] || die "菜单需要以文件方式运行: bash install.sh menu"
+                _ms="$(menu_self)" || die "拿不到可重执行的脚本副本(离线?)。请在本地已下载的 install.sh 上跑菜单。"
                 read -r -p "  API Key(留空=沿用已有/自动生成): " key || key=""
                 echo ""
                 if [ -n "$key" ]; then
-                    exec env NO_MENU=1 bash "$SELF_PATH" --key="$key"
+                    exec env NO_MENU=1 INSTALL_URL="$SELF_URL" bash "$_ms" --key="$key"
                 else
-                    exec env NO_MENU=1 bash "$SELF_PATH"
+                    exec env NO_MENU=1 INSTALL_URL="$SELF_URL" bash "$_ms"
                 fi
                 ;;
             2)
-                [ -n "$SELF_PATH" ] || die "菜单需要以文件方式运行: bash install.sh menu"
+                _ms="$(menu_self)" || die "拿不到可重执行的脚本副本(离线?)。请用: bash install.sh upgrade"
                 echo ""
-                NO_MENU=1 bash "$SELF_PATH" upgrade || warn "升级返回非零"
+                NO_MENU=1 bash "$_ms" upgrade || warn "升级返回非零"
                 ;;
             3)
-                [ -n "$SELF_PATH" ] || die "菜单需要以文件方式运行: bash install.sh menu"
+                _ms="$(menu_self)" || die "拿不到可重执行的脚本副本(离线?)。请用: bash install.sh uninstall [--purge]"
                 read -r -p "  连 /etc/antseed 配置与节点身份一起删? [y/N] " a || a=""
                 case "$a" in
-                    [yY]*) NO_MENU=1 bash "$SELF_PATH" uninstall --purge || warn "卸载返回非零" ;;
-                    *)     NO_MENU=1 bash "$SELF_PATH" uninstall || warn "卸载返回非零" ;;
+                    [yY]*) NO_MENU=1 bash "$_ms" uninstall --purge || warn "卸载返回非零" ;;
+                    *)     NO_MENU=1 bash "$_ms" uninstall || warn "卸载返回非零" ;;
                 esac
                 ;;
             4)
-                [ -n "$SELF_PATH" ] || die "菜单需要以文件方式运行: bash install.sh menu"
+                _ms="$(menu_self)" || die "拿不到可重执行的脚本副本(离线?)。请用: bash install.sh update-cli"
                 # 有更新就装,没有就保持现状
-                NO_MENU=1 ASSUME_YES=${MENU_ASSUME_YES:-1} bash "$SELF_PATH" update-cli || true
+                NO_MENU=1 ASSUME_YES=${MENU_ASSUME_YES:-1} bash "$_ms" update-cli || true
                 ;;
             5) do_status ;;
             6)
@@ -561,8 +606,44 @@ for arg in "$@"; do
 done
 
 [ "$DRY_RUN" = "1" ] && warn "DRY-RUN: 下面只显示将要执行的操作"
+
+# ---------------- 平台闸门(Windows / macOS / WSL) ----------------
+# 这个安装器写 systemd unit、动 /etc、用 systemd 管进程 —— 只能在 Linux 上跑。
+# 与其让人在 Git Bash / PowerShell 里跑到一半炸掉,不如开头就说清楚该怎么办。
+OS_KERNEL="$(uname -s 2>/dev/null || echo unknown)"
+case "$OS_KERNEL" in
+    Linux)
+        # WSL 能跑,但 systemd 默认是关的,给了提示再继续
+        if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+            if [ ! -d /run/systemd/system ]; then
+                warn "检测到 WSL,但 systemd 未启用 —— 服务装上了也不会自启/被管理。"
+                warn "先启用: 编辑 /etc/wsl.conf 加 [boot] 段 + systemd=true,然后在 Windows 里 wsl --shutdown 再进"
+            else
+                log "检测到 WSL + systemd,按普通 Linux 处理"
+            fi
+        fi
+        ;;
+    Darwin)
+        die "这是 macOS,本安装器只支持 Linux(VPS/云主机/WSL)。
+  替代方案: 用 Docker 或一台 Linux VPS 跑;macOS 上装 systemd 服务没有意义。"
+        ;;
+    MINGW*|MSYS*|CYGWIN*)
+        die "这是 Windows 的 Git Bash / MSYS,不是真 Linux —— 装不了 systemd 服务。
+  三种正确姿势:
+    1) WSL2(推荐): PowerShell 里 wsl --install,进 Ubuntu 后启用 systemd:
+         sudo sh -c 'echo -e \"[boot]\\nsystemd=true\" > /etc/wsl.conf'
+         然后在 PowerShell 里 wsl --shutdown,重进 WSL,再跑本安装器
+    2) 直接用一台 Linux VPS(Debian/Ubuntu),SSH 上去跑
+    3) Docker Desktop 里起一个 ubuntu 容器(需 --privileged 才能用 systemd)
+  本安装器目标机必须能跑 systemd。"
+        ;;
+    *)
+        die "不支持的系统: $OS_KERNEL(只支持 Linux,含 WSL2)"
+        ;;
+esac
+
 if [ "$(id -u)" -ne 0 ] && [ "$DRY_RUN" != "1" ]; then
-    die "请用 root 运行: sudo apikey=... bash $0"
+    die "请用 root 运行: sudo -i 后重跑,或 sudo apikey=... bash install.sh"
 fi
 
 case "$GW_PORT" in ''|*[!0-9]*) die "GATEWAY_PORT 必须是数字: $GW_PORT" ;; esac
@@ -964,6 +1045,14 @@ install_node() {
     NODE_BIN="$NODE_DIR/bin/node"
     NPM_BIN="$NODE_DIR/bin/npm"
     NODE_PREFIX="$NODE_DIR"
+    # npm 的 shebang 是 `#!/usr/bin/env node`,子进程必须能在 PATH 里找到 node。
+    # 只写 /etc/profile.d 对**当前进程**无效(那只影响下次登录 shell),所以这里
+    # 同时把 $NODE_DIR/bin 前置进本次运行的 PATH —— 否则 npm install -g 会以
+    # `env: 'node': No such file or directory` 失败。
+    case ":$PATH:" in
+        *":$NODE_DIR/bin:"*) ;;
+        *) [ "$DRY_RUN" = "1" ] || PATH="$NODE_DIR/bin:$PATH"; export PATH ;;
+    esac
     write_file /etc/profile.d/antseed-node.sh 0644 <<EOF
 # 由 antseed-gateway 安装器写入
 case ":\$PATH:" in
