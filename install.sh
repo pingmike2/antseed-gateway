@@ -190,6 +190,11 @@ if [ "$SELF_IS_PIPE" = "1" ]; then
     case "$_self_src" in
         /dev/fd/*|/proc/*/fd/*) SELF_PIPE_FD="${_self_src##*/}" ;;
     esac
+    # bash 读脚本用的那个 fd 带 CLOEXEC,exec 出去的子进程继承不到。
+    # 先复制成 fd 9(shell 打开的 fd 不带 CLOEXEC),退出时才能排空管道。
+    if [ -n "$SELF_PIPE_FD" ]; then
+        eval "exec 9<&$SELF_PIPE_FD" 2>/dev/null || SELF_PIPE_FD=""
+    fi
 fi
 if [ "$SELF_IS_PIPE" = "0" ] && [ -n "$_self_src" ] && [ -r "$_self_src" ] && [ ! -c "$_self_src" ]; then
     _sp_dir="$(cd "$(dirname "$_self_src")" 2>/dev/null && pwd)" || _sp_dir=""
@@ -692,8 +697,9 @@ esac
 TMPDIR_INSTALL="$(mktemp -d)"
 cleanup() {
     # 先把脚本管道的剩余内容读空,curl/wget 就不会因 EPIPE 报错(见 SELF_PIPE_FD)
-    if [ -n "${SELF_PIPE_FD:-}" ] && [ -e "/dev/fd/$SELF_PIPE_FD" ]; then
-        ( timeout 3 cat <"/dev/fd/$SELF_PIPE_FD" >/dev/null 2>&1 & ) 2>/dev/null
+    if [ -n "${SELF_PIPE_FD:-}" ]; then
+        ( timeout 3 cat <&9 >/dev/null 2>&1 & ) 2>/dev/null
+        eval "exec 9<&-" 2>/dev/null
     fi
     rm -rf "$TMPDIR_INSTALL"
     # 菜单从 URL 现取的可执行副本(在 /tmp,不在 TMPDIR_INSTALL 里)
