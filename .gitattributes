@@ -1,0 +1,13 @@
+# 统一换行:所有文本文件在库里存 LF,Windows 检出也不转成 CRLF。
+# install.sh 是自包含产物,任何人重建它都必须得到逐字节相同的结果,
+# 否则 Windows 上跑 tools/build-install.sh 会产生整文件假 diff。
+* text=auto eol=lf
+*.sh  text eol=lf
+*.tpl text eol=lf
+*.py  text eol=lf
+*.mjs text eol=lf
+*.md  text eol=lf
+*.json text eol=lf
+*.tar.gz binary
+*.zip binary
+*.png binary

@@ -424,7 +424,7 @@ do_logs() {
 # ---------------- 7) 改配置 ----------------
 do_config() {
     [ -f "$GW_ENV" ] || die "找不到 $GW_ENV,先跑一次安装"
-    local k v now
+    local k v
     while :; do
         echo ""
         echo "==================== 修改配置 ===================="
@@ -626,7 +626,7 @@ esac
 
 # ---------------- 卸载 ----------------
 do_uninstall() {
-    local u src f link
+    local u f link
     log "停止并移除服务..."
     for u in antseed-gateway antseed-buyer antseed-rotate antseed-free-filter; do
         run_q systemctl stop "$u.service" || true
